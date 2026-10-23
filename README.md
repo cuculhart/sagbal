@@ -46,14 +46,17 @@ Facts flow up, decisions flow down. Kimetron never learns what a
 | `packages/dom` | `@kimetron/dom` | DOM renderer (vendored) |
 | `packages/react` | `@kimetron/react` | React adapter (vendored) |
 | `packages/sagbal` | `@kimetron/sagbal` | the stratum — arbiter, goals, stratum events |
-| `app/` | `sagbal-app` | demo: slimes wandering between posts through a gated wall, one draggable player |
+| `app/` | `sagbal-app` | demo: slimes wandering between posts — a gated partition world and a street-grid maze (`?maze`) — plus a draggable player |
 
 ## The demo
 
-https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
+https://github.com/user-attachments/assets/323f899a-2f8c-4a54-8a07-ae68d2895b3d
 
 - Six wanderers cycle between destination posts and linger ~3s on
-  arrival; a partition with a single gate forces contention.
+  arrival. The video shows the street-grid maze (`?maze=1`): corridors,
+  nine junctions, and cul-de-sacs. The default world is a partition
+  with a single gate — route knowledge is app-side in both, fed to the
+  stratum as ordered via-points.
 - The player **P** is hand-dragged — same physical truth for everyone.
 - Watch the event log — three colors, three strata: `blocked by`
   is raw Kimetron fact; `contention` / `yield` / `deadlock` /
@@ -61,13 +64,13 @@ https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
   phenomena SAGBAL assembled; `arrived` / `dwells` / `goal` switches
   are app-side lifecycle.
 - Collisions are honest: units are invisible 16-gon footprints with
-  app-drawn sprites on top. Drag P through the gate — walls refuse,
-  openings don't.
+  app-drawn sprites on top. Drag P into a building — walls refuse,
+  streets don't.
 - Dragging is a *placement* gesture (Kimetron is a placement engine,
   not a game): the drop point is validated, not the path — you can
   lift P over a wall, but it can't rest inside one.
 - Overtaking keeps **right**: a jammed pair sidesteps to each one's
-  own right, so opposing flows split into lanes at the gate
+  own right, so opposing flows split into lanes in the corridors
   (`Policy.keepSide` — each world picks its side).
 - A head-on lock still goes to a vote: when scores differ, the loser
   alone sidesteps and the winner pushes through; on a tie both step
@@ -83,6 +86,7 @@ https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
 ```sh
 npm install
 npm run dev -w sagbal-app   # demo on http://localhost:5173
+                            # street-grid maze: http://localhost:5173/?maze=1
 npm run typecheck           # all workspaces
 npm run build -w sagbal-app # production build
 npx vitest run              # tests

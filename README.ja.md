@@ -41,23 +41,25 @@ Kimetron Isle          物理の事実だけ：占有・固体・移動の可否
 | `packages/dom` | `@kimetron/dom` | DOM レンダラ（同梱） |
 | `packages/react` | `@kimetron/react` | React アダプタ（同梱） |
 | `packages/sagbal` | `@kimetron/sagbal` | 層の本体 —— 仲裁・目標・stratumイベント |
-| `app/` | `sagbal-app` | デモ：門付きの壁を隔ててポストを巡るスライム6体＋ドラッグ可能なプレイヤー |
+| `app/` | `sagbal-app` | デモ：ポストを巡るスライム6体——門付きの壁の世界と街路網の迷路（`?maze`）——＋ドラッグ可能なプレイヤー |
 
 ## デモ
 
-https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
+https://github.com/user-attachments/assets/323f899a-2f8c-4a54-8a07-ae68d2895b3d
 
 - 徘徊者6体が目的地ポストを巡回し、到着すると約3秒滞留。
-  一つしかない門が競合を引き起こす。
+  動画は街路網の迷路（`?maze=1`）：廊下・9つの辻・袋小路で構成。
+  既定の世界は一つだけの門を持つ壁——どちらも経路の知識はApp側が
+  持ち、via点の列として層に渡します。
 - プレイヤー **P** は手でドラッグ —— 物理の真実は全員に同一。
 - イベントログは3色＝3層。`blocked by` はKimetronの生の事実、
   `contention` / `yield` / `deadlock` / `sidestep` / `explodes` /
   `repeat-block` / `no progress` はSAGBALが組み立てた事象、
   `arrived` / `dwells` / `goal` 切替はApp側のライフサイクル。
 - 衝突は正直：ユニットは不可視の16角形footprint＋App描画の
-  スプライト。Pを門へ運ぶと、壁は拒否し、開口は通す。
+  スプライト。Pを建物へ運ぶと、壁は拒否し、街路は通す。
 - すれ違いは**右側通行**——行き詰まった2体はそれぞれ自分の右へ
-  逸れるので、門の前で対向する流れが自然に上下のレーンへ分かれ
+  逸れるので、廊下で対向する流れが自然に上下のレーンへ分かれ
   ます（`Policy.keepSide` で世界ごとに変えられます）。
 - 正面衝突も多数決で決まります：スコアに差があれば負けた方だけが
   逸れて勝者が通り、同点なら両方が脇へ退避します（ログでは
@@ -76,6 +78,7 @@ https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
 ```sh
 npm install
 npm run dev -w sagbal-app   # デモ http://localhost:5173
+                            # 街路網の迷路 http://localhost:5173/?maze=1
 npm run typecheck           # 全ワークスペース
 npm run build -w sagbal-app # プロダクションビルド
 npx vitest run              # テスト
