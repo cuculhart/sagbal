@@ -66,6 +66,9 @@ https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
 - Dragging is a *placement* gesture (Kimetron is a placement engine,
   not a game): the drop point is validated, not the path — you can
   lift P over a wall, but it can't rest inside one.
+- Overtaking keeps **right**: a jammed pair sidesteps to each one's
+  own right, so opposing flows split into lanes at the gate
+  (`Policy.keepSide` — each world picks its side).
 
 ## Development
 
@@ -79,14 +82,15 @@ npx vitest run              # tests
 
 ## Status
 
-v0.2 — intent gathering, score auctions, yield hysteresis,
+v0.3.0 — intent gathering, score auctions, yield hysteresis,
 via-points, impeded detection, goal switching, suspended-goal wake,
-deadlock detection with asymmetric mutual retreat (both sides lose,
-each sidesteps to its own side of the lane), livelock monitors
+deadlock detection with mutual retreat, livelock monitors
 (same-blocker counts, progress-zero windows, deterministic
-re-approach jitter), and edge-triggered stress explosions.
-Diffusion (repulsion when fully boxed in) is not yet implemented —
-a `retreat-failed` fact is emitted for the app to interpret.
+re-approach jitter), edge-triggered stress explosions, and a
+keep-side sidestep convention (`Policy.keepSide` — the demo world
+keeps right, so opposing flows form lanes). Diffusion (repulsion
+when fully boxed in) is not yet implemented — a `retreat-failed`
+fact is emitted for the app to interpret.
 
 ## License
 
