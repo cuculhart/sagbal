@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-23
+
+### Added
+
+- `@kimetron/sagbal`: deadlocks join the consensus (protocol §2+§4) —
+  a closed cycle now bids like any contention: on a score gap the
+  loser alone sidesteps and the winner pushes through once it vacates;
+  a tie keeps the symmetric mutual retreat. `deadlock` gains an
+  optional `winnerId`; `mutual-retreat` only describes true both-
+  sidestep resolutions. Exploding agents (+100) push through jams —
+  the "overwhelming stress gap" falls out of the score, no special
+  threshold needed
+- `@kimetron/sagbal`: §5 diffusion — an agent that wants to move but
+  finds every direction obstructed reports `boxed` and radiates a
+  repulsion field: neighbors inside `Policy.diffuseRadius` (default
+  600) are pushed away, distance-scaled, and each push reports
+  `diffuse`. `retreat-failed` also starts a broadcast
+- `@kimetron/sagbal`: §8 local-density facts — neighbors within
+  `Policy.crowdRadius` (default 450): `crowded` at `crowdN` (default
+  7, the 8/9 warning of the packed grid) and `full` at `fullN`
+  (default 8 — unresolvable congestion), edge-triggered on level
+  transitions. `AgentState` gains `boxed`, `crowd`
+- `@kimetron/sagbal`: external intents — `Arbiter.setIntent(id,
+  {to, score})` / `clearIntent` registers an app-driven mover that
+  bids like everyone else but is never stratum-moved. Head-on
+  conflicts sidestep the agent (the external wins by physical
+  necessity); one-way conflicts bid by score; parked agents in the
+  path are pushed aside
+- `sagbal-app`: dragging P now registers its drag target as an intent
+  (score 90) — wanderers yield, sidestep, and reroute around the hand
+
+### Changed
+
+- `@kimetron/sagbal`: `deadlock` is emitted before auction with
+  `winnerId` when the consensus resolved it — the pair no longer
+  bypasses the score auction by design
+
 ## [0.3.0] - 2026-10-23
 
 ### Added

@@ -69,6 +69,14 @@ https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
 - Overtaking keeps **right**: a jammed pair sidesteps to each one's
   own right, so opposing flows split into lanes at the gate
   (`Policy.keepSide` — each world picks its side).
+- A head-on lock still goes to a vote: when scores differ, the loser
+  alone sidesteps and the winner pushes through; on a tie both step
+  aside (`deadlock → winner` vs `both sidestep` in the log).
+- A fully pocketed wanderer broadcasts — its neighbors scatter
+  (`boxed` → `diffuse`), and crowd pressure shows up as `crowded` /
+  `full` facts.
+- Drag P through traffic: the drag registers as an intent, so
+  wanderers yield and dodge the hand like any other mover.
 
 ## Development
 
@@ -82,15 +90,14 @@ npx vitest run              # tests
 
 ## Status
 
-v0.3.0 — intent gathering, score auctions, yield hysteresis,
+v0.4.0 — intent gathering, score auctions, yield hysteresis,
 via-points, impeded detection, goal switching, suspended-goal wake,
-deadlock detection with mutual retreat, livelock monitors
-(same-blocker counts, progress-zero windows, deterministic
-re-approach jitter), edge-triggered stress explosions, and a
-keep-side sidestep convention (`Policy.keepSide` — the demo world
-keeps right, so opposing flows form lanes). Diffusion (repulsion
-when fully boxed in) is not yet implemented — a `retreat-failed`
-fact is emitted for the app to interpret.
+deadlocks that join the consensus (score gap → loser sidesteps;
+tie → both sidestep), livelock monitors, edge-triggered stress
+explosions, keep-side sidesteps (`Policy.keepSide`), §5 diffusion
+(boxed broadcast + repulsion field), §8 local-density facts
+(`crowded` / `full`), and external intents (`setIntent` — the
+hand-dragged player bids like everyone else).
 
 ## License
 

@@ -83,11 +83,22 @@ function describeEvent(ev: StratumEvent): { text: string; cls: string } {
     case 'yield':
       return { text: `${ev.objectId} yields to ${ev.toId}`, cls: 'ev-stratum' }
     case 'deadlock':
-      return { text: `deadlock ${ev.objectIds.join(' ↔ ')}`, cls: 'ev-stratum' }
+      return {
+        text: `deadlock ${ev.objectIds.join(' ↔ ')}${ev.winnerId ? ` → ${ev.winnerId}` : ' — both sidestep'}`,
+        cls: 'ev-stratum',
+      }
     case 'mutual-retreat':
       return { text: `${ev.objectIds.join(' + ')} sidestep`, cls: 'ev-stratum' }
     case 'retreat-failed':
       return { text: `${ev.objectIds.join(', ')} can't retreat`, cls: 'ev-stratum' }
+    case 'boxed':
+      return { text: `${ev.objectId} boxed in — broadcasting`, cls: 'ev-stratum' }
+    case 'diffuse':
+      return { text: `${ev.objectId} scatters from ${ev.fromId}`, cls: 'ev-stratum' }
+    case 'crowded':
+      return { text: `${ev.objectId} crowded (x${ev.count})`, cls: 'ev-stratum' }
+    case 'full':
+      return { text: `${ev.objectId} jam full — unresolvable`, cls: 'ev-stratum' }
     case 'impeded':
       return { text: `${ev.objectId} impeded x${ev.count} on ${ev.goalId}`, cls: 'ev-stratum' }
     case 'explode':
@@ -153,9 +164,26 @@ export function App() {
 
   useEffect(() => {
     if (paused) return
-    const t = setInterval(() => arbiter.tick(), 80)
+    const t = setInterval(() => {
+      // the player's drag is an intent at the stratum — wanderers
+      // dodge the hand like they dodge each other. The drag itself
+      // still commits through the engine's placement rules.
+      const p = engine.doc.objects.find((o) => o.id === PLAYER_ID)
+      if (p && engine.dragDelta && engine.selectedIds.has(PLAYER_ID)) {
+        arbiter.setIntent(PLAYER_ID, {
+          to: {
+            x: p.x + p.w / 2 + engine.dragDelta.x,
+            y: p.y + p.h / 2 + engine.dragDelta.y,
+          },
+          score: 90,
+        })
+      } else {
+        arbiter.clearIntent(PLAYER_ID)
+      }
+      arbiter.tick()
+    }, 80)
     return () => clearInterval(t)
-  }, [arbiter, paused])
+  }, [arbiter, engine, paused])
 
   const player = engine.doc.objects.find((o) => o.id === PLAYER_ID)
   const playerGoal = arbiter.state(PLAYER_ID)?.goal
@@ -202,9 +230,10 @@ export function App() {
           <p className="hint">
             Wanderers A–F cycle between the six posts (blue squares) and
             linger a few seconds on arrival — watch them contest the gate,
-            sidestep head-on jams, and explode through when they must.
-            Drag the purple unit P through the jam; the wanderers will
-            yield, step back, and reroute around it.
+            sidestep head-on jams, scatter off a boxed neighbor, and
+            explode through when they must. Drag the purple unit P through
+            the jam; the wanderers will yield, step back, and reroute
+            around it.
           </p>
         </aside>
       </div>

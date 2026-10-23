@@ -13,6 +13,11 @@ import type { Engine, Pt, Rect, WorldObject } from '@kimetron/core'
  * yield hysteresis, deadlock detection + asymmetric mutual retreat,
  * livelock monitors (repeat-block, progress-zero, id jitter),
  * impeded counting, goal switching, suspended-goal wake.
+ * v0.4: §5 diffusion (boxed broadcast + repulsion field), §8 local
+ * density facts, deadlocks join the consensus (score gap → the loser
+ * alone sidesteps; a tie keeps the mutual retreat), keep-side
+ * sidestep convention, external intents (the hand-dragged player
+ * bids like everyone else — it just can't be moved by the stratum).
  * See idea/garakuta/sagbal/protocol.md for the full design.
  */
 
@@ -56,6 +61,10 @@ export interface AgentState {
   sameBlock: { blockerId: string; goalId: string; count: number }
   /** recent distances to the current waypoint — progress-zero window (§7) */
   distHist: number[]
+  /** §5 boxed-in broadcast — wants to move but every direction is obstructed */
+  boxed: boolean
+  /** §8 local density level — 0 clear, 1 crowded, 2 full */
+  crowd: number
 }
 
 /** Facts SAGBAL reports upward. Interpretation vocabulary stays App-side. */
@@ -68,12 +77,22 @@ export type StratumEvent =
   | { type: 'arrived'; objectId: string; goalId: string }
   | { type: 'goal-switch'; objectId: string; from?: string; to?: string }
   | { type: 'woke'; objectId: string; goalId: string }
-  /** mutual occupancy of each other's desired space — a §4 closed cycle */
-  | { type: 'deadlock'; objectIds: string[] }
+  /** mutual occupancy of each other's desired space — a §4 closed cycle.
+   *  winnerId is set when the consensus resolved it (the loser alone
+   *  sidesteps); absent on a score tie — both sidestep (§4 fallback) */
+  | { type: 'deadlock'; objectIds: string[]; winnerId?: string }
   /** both members of a deadlock sidestepped (§4 mutual retreat) */
   | { type: 'mutual-retreat'; objectIds: string[] }
   /** every retreat direction was blocked — a §5 diffusion request fact */
   | { type: 'retreat-failed'; objectIds: string[] }
+  /** wants to move but every direction is obstructed — §5 broadcast begins */
+  | { type: 'boxed'; objectId: string }
+  /** pushed aside by a boxed neighbor's repulsion field (§5) */
+  | { type: 'diffuse'; objectId: string; fromId: string }
+  /** local density crossed the warning threshold (§8) */
+  | { type: 'crowded'; objectId: string; count: number }
+  /** local density reached full occupancy — unresolvable congestion (§8) */
+  | { type: 'full'; objectId: string; count: number }
   /** stress crossed the explosion threshold — the bonus is on (§3) */
   | { type: 'explode'; objectId: string; stress: number }
   /** same blocker, same goal, again — a §7 livelock symptom */
@@ -98,6 +117,16 @@ export interface Policy {
    *  A keep-side rule turns opposing flows into lanes over time
    *  (the world's traffic-side personality — protocol §4 sub-idea). */
   keepSide?: 'self' | 'left' | 'right'
+  /** §5 repulsion field radius around a boxed agent (world units) */
+  diffuseRadius?: number
+  /** §8 center distance that counts as a crowd neighbor (world units) */
+  crowdRadius?: number
+  /** §8 neighbor count that reports `crowded` (default 7 — the 8/9
+   *  warning of the 3×3 occupancy grid translated to continuous space) */
+  crowdN?: number
+  /** §8 neighbor count that reports `full` — unresolvable congestion
+   *  (default 8 — the packed 3×3 grid, self included) */
+  fullN?: number
 }
 
 export const IMPEDED_LIMIT = 5 // e.g. "5 strikes → try another way"
@@ -110,6 +139,10 @@ const PROGRESS_WINDOW = 60 // ticks (~5s at 80ms) without a new best distance
 const PROGRESS_EPS = 1 // world units of "improvement" that count
 const JITTER_MAX = 4 // extra yield ticks after a mutual retreat (§7)
 const RETREAT_TILT = 0.84 // lateral:backward mix — a ~40° sidestep
+const DIFFUSE_RADIUS = 600 // §5 repulsion field reach (world units)
+const CROWD_RADIUS = 450 // §8 crowd neighborhood (≈3×3 unit grid, center dist)
+const CROWD_N = 7 // §8 warning level — 8/9 occupancy of the packed grid
+const FULL_N = 8 // §8 unresolvable — packed 3×3, self included
 
 /** deterministic per-id jitter — never Math.random, replays must match */
 function jitterOf(id: string): number {
@@ -124,6 +157,11 @@ export interface Arbiter {
   setGoal(objectId: string, goal: Goal | undefined): void
   /** park the current goal with a wake condition; falls to nextGoal */
   suspend(objectId: string, wake?: (e: Engine) => boolean): void
+  /** register an app-driven mover's intent — the object bids in
+   *  contention like everyone else but is never moved by the stratum
+   *  (the hand-dragged player is the canonical case; score is App's) */
+  setIntent(objectId: string, intent: { to: Pt; score: number }): void
+  clearIntent(objectId: string): void
   state(objectId: string): AgentState | undefined
   on(fn: (ev: StratumEvent) => void): () => void
   /** one arbitration round — call from the app's game loop */
@@ -159,7 +197,11 @@ function overlaps(a: Rect, b: Rect) {
  *  to opposite sides without any id hashing. A perfectly dead-on
  *  pair takes the left of each one's own approach axis — opposite
  *  axes, opposite lanes, still fully deterministic. */
-function retreatStep(mine: Desired, other: Desired, keepSign: number): Pt {
+function retreatStep(
+  mine: { o: WorldObject; step: Pt },
+  other: { o: WorldObject; step: Pt },
+  keepSign: number,
+): Pt {
   const cM = center(mine.o)
   const cO = center(other.o)
   const d = Math.hypot(mine.step.x, mine.step.y) || 1
@@ -195,6 +237,7 @@ function retreatStep(mine: Desired, other: Desired, keepSign: number): Pt {
 
 export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   const agents = new Map<string, AgentState>()
+  const externals = new Map<string, { to: Pt; score: number }>()
   const listeners = new Set<(ev: StratumEvent) => void>()
   const emit = (ev: StratumEvent) => listeners.forEach((fn) => fn(ev))
   let now = 0
@@ -202,6 +245,10 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   const step = policy.step ?? 60
   const arrive = policy.arrive ?? 150
   const progressWindow = policy.progressWindow ?? PROGRESS_WINDOW
+  const diffuseRadius = policy.diffuseRadius ?? DIFFUSE_RADIUS
+  const crowdRadius = policy.crowdRadius ?? CROWD_RADIUS
+  const crowdN = policy.crowdN ?? CROWD_N
+  const fullN = policy.fullN ?? FULL_N
   // keep-side sidestep: +1 rotates the forward vector +90° — which is
   // "right" under a top-left (y-down) origin and "left" under
   // bottom-left (y-up), so resolve per doc.origin for visual honesty.
@@ -256,6 +303,25 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
     }
   }
 
+  /** §5 boxed check — every cardinal step position is obstructed.
+   *  "Wants to move but can't in any direction" is what starts the
+   *  diffusion broadcast; a parked agent isn't boxed, it just sits. */
+  function isBoxed(id: string, o: WorldObject): boolean {
+    const r = rectOf(o)
+    return [
+      { x: step, y: 0 },
+      { x: -step, y: 0 },
+      { x: 0, y: step },
+      { x: 0, y: -step },
+    ].every(
+      (c) =>
+        engine.collisions(
+          { x: r.x + c.x, y: r.y + c.y, w: r.w, h: r.h },
+          new Set([id]),
+        ).length > 0,
+    )
+  }
+
   return {
     add(o) {
       agents.set(o.id, {
@@ -269,6 +335,8 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         exploded: false,
         sameBlock: { blockerId: '', goalId: '', count: 0 },
         distHist: [],
+        boxed: false,
+        crowd: 0,
       })
     },
     remove(objectId) {
@@ -283,6 +351,12 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       if (!a?.goal) return
       a.suspended.push({ goal: a.goal, wake })
       adopt(a, policy.nextGoal?.(a, engine), now)
+    },
+    setIntent(objectId, intent) {
+      if (obj(objectId)) externals.set(objectId, intent)
+    },
+    clearIntent(objectId) {
+      externals.delete(objectId)
     },
     state: (objectId) => agents.get(objectId),
     on(fn) {
@@ -349,29 +423,103 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         }
       }
 
+      // 1.5 external intents — app-driven movers (the hand-dragged
+      //     player): they bid by their given score but are never moved
+      //     by the stratum. The intent's rect is their next step.
+      const extIntents: { id: string; o: WorldObject; step: Pt; rect: Rect; score: number }[] = []
+      for (const [id, it] of externals) {
+        const o = obj(id)
+        if (!o) continue
+        const c = center(o)
+        const dx = it.to.x - c.x
+        const dy = it.to.y - c.y
+        const dd = Math.hypot(dx, dy)
+        const s =
+          dd < 1e-3
+            ? { x: 0, y: 0 }
+            : { x: (dx / dd) * Math.min(step, dd), y: (dy / dd) * Math.min(step, dd) }
+        extIntents.push({
+          id, o, step: s,
+          rect: { x: o.x + s.x, y: o.y + s.y, w: o.w, h: o.h },
+          score: it.score,
+        })
+      }
+
       // 2. deadlock — a closed cycle in the dependency graph: A's desired
-      //    rect covers B's current footprint AND B's covers A's. Both lose;
-      //    they sidestep asymmetrically instead of bidding (protocol §4).
+      //    rect covers B's current footprint AND B's covers A's.
+      //    A closed cycle is still a contention (§2): the pair bids, the
+      //    loser alone sidesteps, the winner proceeds once it vacates.
+      //    A score tie falls back to §4 symmetric mutual retreat.
       //    Pairwise cycles are detected directly; longer cycles collapse
       //    into overlapping pairwise hits (good enough at this scale).
-      const retreatWith = new Map<string, Desired>()
+      const retreatWith = new Map<
+        string,
+        { id: string; o: WorldObject; step: Pt; symmetric: boolean }
+      >()
+      const losers = new Set<string>()
       for (let i = 0; i < intents.length; i++) {
         for (let j = i + 1; j < intents.length; j++) {
           const p = intents[i]
           const q = intents[j]
           if (retreatWith.has(p.a.objectId) || retreatWith.has(q.a.objectId)) continue
-          if (overlaps(p.rect, rectOf(q.o)) && overlaps(q.rect, rectOf(p.o))) {
-            retreatWith.set(p.a.objectId, q)
-            retreatWith.set(q.a.objectId, p)
+          if (!overlaps(p.rect, rectOf(q.o)) || !overlaps(q.rect, rectOf(p.o))) continue
+          if (p.score === q.score) {
+            retreatWith.set(p.a.objectId, { id: q.a.objectId, o: q.o, step: q.step, symmetric: true })
+            retreatWith.set(q.a.objectId, { id: p.a.objectId, o: p.o, step: p.step, symmetric: true })
             emit({ type: 'deadlock', objectIds: [p.a.objectId, q.a.objectId] })
+          } else {
+            const [win, lose] = p.score > q.score ? [p, q] : [q, p]
+            retreatWith.set(lose.a.objectId, { id: win.a.objectId, o: win.o, step: win.step, symmetric: false })
+            emit({ type: 'deadlock', objectIds: [p.a.objectId, q.a.objectId], winnerId: win.a.objectId })
+            emit({ type: 'yield', objectId: lose.a.objectId, toId: win.a.objectId })
           }
+        }
+      }
+
+      // 2.5 external intent conflicts — a stratum-moved agent always
+      //     resolves on its own side: head-on it sidesteps (the external
+      //     keeps its spot by physical necessity), one-way it bids —
+      //     outscored agents yield, a higher-scored agent stands and the
+      //     external will bounce off it physically. Parked agents in
+      //     the external's way are pushed aside (they're not bidding).
+      for (const e of extIntents) {
+        for (const d of intents) {
+          if (retreatWith.has(d.a.objectId)) continue
+          if (overlaps(d.rect, rectOf(e.o)) && overlaps(e.rect, rectOf(d.o))) {
+            retreatWith.set(d.a.objectId, { id: e.id, o: e.o, step: e.step, symmetric: false })
+            emit({ type: 'deadlock', objectIds: [d.a.objectId, e.id], winnerId: e.id })
+            emit({ type: 'yield', objectId: d.a.objectId, toId: e.id })
+          } else if (overlaps(e.rect, rectOf(d.o)) || overlaps(d.rect, e.rect)) {
+            if (e.score >= d.score) {
+              losers.add(d.a.objectId)
+              emit({ type: 'contention', objectIds: [d.a.objectId, e.id], winnerId: e.id })
+              emit({ type: 'yield', objectId: d.a.objectId, toId: e.id })
+            } else {
+              emit({ type: 'contention', objectIds: [d.a.objectId, e.id], winnerId: d.a.objectId })
+            }
+          }
+        }
+        for (const a of agents.values()) {
+          if (a.objectId === e.id) continue
+          if (intents.some((d) => d.a.objectId === a.objectId)) continue
+          const o = obj(a.objectId)
+          if (!o || !overlaps(e.rect, rectOf(o))) continue
+          const cO = center(o)
+          const cE = center(e.o)
+          const dx = cO.x - cE.x
+          const dy = cO.y - cE.y
+          const dd = Math.hypot(dx, dy) || 1
+          const ok =
+            engine.tryMove(a.objectId, (dx / dd) * step, (dy / dd) * step) ||
+            engine.tryMove(a.objectId, (dx / dd) * step, 0) ||
+            engine.tryMove(a.objectId, 0, (dy / dd) * step)
+          if (ok) emit({ type: 'yield', objectId: a.objectId, toId: e.id })
         }
       }
 
       // 3. contention — overlapping desired rects bid by score;
       //    the winner is the consensus (protocol §2). Losers yield.
       //    Deadlocked agents are out of the auction: they sidestep.
-      const losers = new Set<string>()
       for (let i = 0; i < intents.length; i++) {
         for (let j = i + 1; j < intents.length; j++) {
           const p = intents[i]
@@ -390,25 +538,31 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       //    report it as a fact. Score stays App-side; ids pass through.
       const retreatLogged = new Set<string>()
       for (const d of intents) {
-        const partner = retreatWith.get(d.a.objectId)
-        if (partner) {
-          const pair = [d.a.objectId, partner.a.objectId].sort().join(' ')
-          if (!retreatLogged.has(pair)) {
-            retreatLogged.add(pair)
-            emit({ type: 'mutual-retreat', objectIds: [d.a.objectId, partner.a.objectId] })
+        const rw = retreatWith.get(d.a.objectId)
+        if (rw) {
+          // symmetric pairs report one mutual-retreat per pair;
+          // asymmetric losers already had their yield at detection
+          if (rw.symmetric) {
+            const pair = [d.a.objectId, rw.id].sort().join(' ')
+            if (!retreatLogged.has(pair)) {
+              retreatLogged.add(pair)
+              emit({ type: 'mutual-retreat', objectIds: [d.a.objectId, rw.id] })
+            }
           }
-          const r = retreatStep(d, partner, keepSign)
+          const r = retreatStep(d, rw, keepSign)
           // jitter staggers re-approach so the sidestep holds (§7)
           d.a.yieldedUntil = now + YIELD_TICKS + jitterOf(d.a.objectId)
           bumpStress(d.a)
-          recordBlock(d.a, partner.a.objectId)
+          recordBlock(d.a, rw.id)
           const ok =
             engine.tryMove(d.a.objectId, r.x, r.y) ||
             engine.tryMove(d.a.objectId, r.x, 0) ||
             engine.tryMove(d.a.objectId, 0, r.y)
-          // every direction blocked — the §5 diffusion-request fact;
-          // answering it with repulsion movement is a later stratum
-          if (!ok) emit({ type: 'retreat-failed', objectIds: [d.a.objectId] })
+          // every direction blocked — the §5 broadcast starts here
+          if (!ok) {
+            emit({ type: 'retreat-failed', objectIds: [d.a.objectId] })
+            d.a.boxed = true
+          }
           continue
         }
         if (losers.has(d.a.objectId)) {
@@ -441,10 +595,69 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         recordBlock(d.a, blocker?.id ?? '')
         d.a.impeded++
         bumpStress(d.a)
+        // wants to move but every direction is obstructed — §5 broadcast
+        const o2 = obj(d.a.objectId)
+        if (o2 && isBoxed(d.a.objectId, o2)) {
+          if (!d.a.boxed) emit({ type: 'boxed', objectId: d.a.objectId })
+          d.a.boxed = true
+        }
         if (d.a.impeded >= IMPEDED_LIMIT && d.a.goal) {
           emit({ type: 'impeded', objectId: d.a.objectId, count: d.a.impeded, goalId: d.a.goal.id })
           adopt(d.a, policy.nextGoal?.(d.a, engine), now)
         }
+      }
+
+      // 5. §5 diffusion — a boxed agent radiates a repulsion field;
+      //    neighbors are pushed away from it, easing the jam. The field
+      //    is distance-scaled and stratum-moves arbiter agents only.
+      for (const a of agents.values()) {
+        if (!a.boxed) continue
+        const o = obj(a.objectId)
+        if (!o || !isBoxed(a.objectId, o)) {
+          a.boxed = false
+          continue
+        }
+        const cb = center(o)
+        for (const b of agents.values()) {
+          if (b.objectId === a.objectId) continue
+          const ob = obj(b.objectId)
+          if (!ob) continue
+          const cn = center(ob)
+          const dx = cn.x - cb.x
+          const dy = cn.y - cb.y
+          const dist = Math.hypot(dx, dy)
+          if (dist < 1e-3 || dist >= diffuseRadius) continue
+          const g = (step * (1 - dist / diffuseRadius)) // closer = harder push
+          const px = (dx / dist) * g
+          const py = (dy / dist) * g
+          const moved =
+            engine.tryMove(b.objectId, px, py) ||
+            engine.tryMove(b.objectId, px, 0) ||
+            engine.tryMove(b.objectId, 0, py)
+          if (moved) emit({ type: 'diffuse', objectId: b.objectId, fromId: a.objectId })
+        }
+      }
+
+      // 6. §8 local density — neighbors within crowdRadius; report on
+      //    level transitions only. `full` is the "unresolvable" fact —
+      //    what the App does with it stays App-side.
+      for (const a of agents.values()) {
+        const o = obj(a.objectId)
+        if (!o) continue
+        const c = center(o)
+        let n = 0
+        for (const b of agents.values()) {
+          if (b.objectId === a.objectId) continue
+          const ob = obj(b.objectId)
+          if (!ob) continue
+          const cn = center(ob)
+          if (Math.hypot(cn.x - c.x, cn.y - c.y) <= crowdRadius) n++
+        }
+        const lvl = n >= fullN ? 2 : n >= crowdN ? 1 : 0
+        if (lvl === a.crowd) continue
+        a.crowd = lvl
+        if (lvl === 2) emit({ type: 'full', objectId: a.objectId, count: n })
+        else if (lvl === 1) emit({ type: 'crowded', objectId: a.objectId, count: n })
       }
     },
   }

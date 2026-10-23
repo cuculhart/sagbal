@@ -174,6 +174,128 @@ describe('§3 stress explosion', () => {
   })
 })
 
+describe('§2/§4 deadlock joins the consensus (v0.4)', () => {
+  it('a score gap resolves the cycle — the loser alone sidesteps', () => {
+    // uB is exploding (stress ≥ 12 → +100): it wins the lock, uA yields
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 1320, 1000)
+    const { engine, arbiter, events } = setup([uA, uB])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 } })
+    arbiter.setGoal('uB', { id: 'gW', to: { x: 300, y: 1150 } })
+    arbiter.state('uB')!.stress = 12
+
+    arbiter.tick()
+
+    const dl = events.find((e) => e.type === 'deadlock')
+    expect(dl && dl.type === 'deadlock' && dl.winnerId).toBe('uB')
+    expect(events.some((e) => e.type === 'yield' && e.objectId === 'uA')).toBe(true)
+    // NOT the symmetric retreat — only the loser moved
+    expect(events.some((e) => e.type === 'mutual-retreat')).toBe(false)
+    expect(events.some((e) => e.type === 'contention')).toBe(false)
+    const a = obj(engine, 'uA')
+    expect(a.x).toBeLessThan(1000) // uA sidestepped back
+    arbiter.tick()
+    // next tick: uA still vacated, uB pushes through
+    expect(obj(engine, 'uB').x).toBeLessThan(1320)
+  })
+
+  it('a score tie keeps the symmetric mutual retreat (§4 fallback)', () => {
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 1320, 1000)
+    const { arbiter, events } = setup([uA, uB])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 } })
+    arbiter.setGoal('uB', { id: 'gW', to: { x: 300, y: 1150 } })
+    arbiter.tick()
+    const dl = events.find((e) => e.type === 'deadlock')
+    expect(dl && dl.type === 'deadlock' && dl.winnerId).toBeUndefined()
+    expect(events.some((e) => e.type === 'mutual-retreat')).toBe(true)
+  })
+})
+
+describe('§5 diffusion (v0.4)', () => {
+  it('a boxed agent broadcasts — neighbors are pushed out of the jam', () => {
+    // uA wants east but is pocketed: walls N/S/W, uB parked adjacent E
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 1300, 1000) // no goal — just standing in the way
+    const { engine, arbiter, events } = setup([
+      wall('wN', 600, 700, 2000, 300),
+      wall('wS', 600, 1300, 2000, 300),
+      wall('wW', 880, 700, 120, 900),
+      uA,
+      uB,
+    ])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 } })
+
+    arbiter.tick()
+
+    // uA's step east hits uB; every cardinal direction is obstructed
+    expect(events.some((e) => e.type === 'boxed' && e.objectId === 'uA')).toBe(true)
+    // the repulsion field pushes uB away from uA — east, one field step
+    expect(
+      events.some((e) => e.type === 'diffuse' && e.objectId === 'uB' && e.fromId === 'uA'),
+    ).toBe(true)
+    expect(obj(engine, 'uB').x).toBeGreaterThan(1300)
+  })
+})
+
+describe('§8 local density (v0.4)', () => {
+  it('reports crowded at 7 neighbors and full at 8 — on transitions only', () => {
+    // 3×3-packed cluster minus one edge seat: uC has 7 neighbors
+    const ring = (cx: number, cy: number, skip: number) =>
+      [-300, 0, 300]
+        .flatMap((dx) => [-300, 0, 300].map((dy) => ({ dx, dy })))
+        .filter((p) => !(p.dx === 0 && p.dy === 0))
+        .filter((_, i) => i !== skip)
+        .map((p, i) => unit(`n${i}`, cx + p.dx, cy + p.dy))
+    const uC = unit('uC', 1000, 1000)
+    const { arbiter, events } = setup([uC, ...ring(1000, 1000, 0)])
+
+    arbiter.tick()
+
+    expect(events.some((e) => e.type === 'crowded' && e.objectId === 'uC')).toBe(true)
+    expect(events.some((e) => e.type === 'full' && e.objectId === 'uC')).toBe(false)
+
+    // fill the last seat — a packed 3×3 is unresolvable (§8)
+    const { arbiter: a2, events: e2 } = setup([unit('uC', 1000, 1000), ...ring(1000, 1000, -1)])
+    a2.tick()
+    expect(e2.some((e) => e.type === 'full' && e.objectId === 'uC' && e.count === 8)).toBe(true)
+  })
+})
+
+describe('external intents — the hand-dragged player (v0.4)', () => {
+  it('a head-on external intent makes the agent sidestep — external is never moved', () => {
+    const uP = unit('uP', 1000, 1000)
+    const uC = unit('uC', 1000, 1350) // charging north into P's path
+    const { engine, arbiter, events } = setup([uP, uC])
+    arbiter.setGoal('uC', { id: 'gN', to: { x: 1150, y: 400 } })
+    arbiter.setIntent('uP', { to: { x: 1150, y: 1600 }, score: 90 })
+
+    arbiter.tick()
+
+    const dl = events.find((e) => e.type === 'deadlock')
+    expect(dl && dl.type === 'deadlock' && dl.winnerId).toBe('uP')
+    expect(events.some((e) => e.type === 'yield' && e.objectId === 'uC')).toBe(true)
+    // uC sidestepped; uP itself is untouched by the stratum
+    const c = obj(engine, 'uC')
+    expect(c.x !== 1000 || c.y !== 1350).toBe(true)
+    const p = obj(engine, 'uP')
+    expect(p.x).toBe(1000)
+    expect(p.y).toBe(1000)
+  })
+
+  it('a parked agent in the external\'s path is pushed aside', () => {
+    const uP = unit('uP', 1000, 1000)
+    const uD = unit('uD', 1350, 1000) // parked — no goal at all
+    const { engine, arbiter, events } = setup([uP, uD])
+    arbiter.setIntent('uP', { to: { x: 2500, y: 1150 }, score: 90 })
+
+    arbiter.tick()
+
+    expect(events.some((e) => e.type === 'yield' && e.objectId === 'uD' && e.toId === 'uP')).toBe(true)
+    expect(obj(engine, 'uD').x).toBeGreaterThan(1350)
+  })
+})
+
 describe('§7 livelock monitors', () => {
   it('repeat-block counts the same blocker toward the same goal', () => {
     // uA presses south into an immovable solid uX
