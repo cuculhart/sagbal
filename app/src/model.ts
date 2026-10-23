@@ -131,6 +131,9 @@ function routeVia(from: WorldObject | undefined, to: Pt): Pt[] | undefined {
 export const policy: Policy = {
   step: 60,
   arrive: 200,
+  // this world's traffic personality — keep right when sidestepping,
+  // so opposing gate traffic settles into up/down lanes
+  keepSide: 'right',
   score: (o) => (o.id === PLAYER_ID ? 90 : 10),
   nextGoal: (a, engine) =>
     a.objectId === PLAYER_ID

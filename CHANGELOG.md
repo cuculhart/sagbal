@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `@kimetron/sagbal`: `Policy.keepSide` (`'self' | 'left' | 'right'`)
+  — a fixed keep-side sidestep convention (protocol §4 sub-idea):
+  every agent retreats toward the same rotational side of its own
+  heading, so opposing flows settle into lanes instead of each pair
+  negotiating anew. Resolved against `doc.origin` so `'right'` is
+  visually right; `'self'` (default) keeps the geometric pick
+- `sagbal-app`: the demo world keeps right (`keepSide: 'right'`)
+
 ## [0.2.0] - 2026-10-23
 
 ### Added

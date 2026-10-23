@@ -85,6 +85,29 @@ describe('§4 deadlock → mutual retreat', () => {
     expect(run()).toEqual(run())
   })
 
+  it('keepSide: right sidesteps to each agent\'s own right — near head-on too', () => {
+    // uA sits slightly NORTH of uB. 'self' would keep A on its offset
+    // side (north); 'right' pushes A to its own right (south = +y
+    // under top-left origin) regardless of where B sits.
+    const mk = () => [unit('uA', 1000, 990), unit('uB', 1320, 1010)] as const
+    const run = (keepSide: 'self' | 'right') => {
+      const [uA, uB] = mk()
+      const { engine, arbiter } = setup([uA, uB], { keepSide })
+      arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1140 } })
+      arbiter.setGoal('uB', { id: 'gW', to: { x: 300, y: 1160 } })
+      arbiter.tick()
+      return { a: obj(engine, 'uA'), b: obj(engine, 'uB') }
+    }
+    const self = run('self')
+    const right = run('right')
+    // 'self' keeps each on its offset side: A (north) tilts further north
+    expect(self.a.y).toBeLessThan(990)
+    // 'right' sends A to its own right — south under top-left origin —
+    // and B (facing west) to ITS right — north. Opposite world lanes.
+    expect(right.a.y).toBeGreaterThan(990)
+    expect(right.b.y).toBeLessThan(1010)
+  })
+
   it('a retreat into a pocket slides along the wall or reports retreat-failed', () => {
     // corridor: walls above and below; uA also has a wall right behind it
     const uA = unit('uA', 820, 1000)

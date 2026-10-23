@@ -92,6 +92,12 @@ export interface Policy {
   nextGoal?: (a: AgentState, e: Engine) => Goal | undefined
   /** ticks without distance improvement before a progress-zero fact (§7) */
   progressWindow?: number
+  /** §4 sidestep convention — 'self': each agent takes the side it
+   *  already offsets to (default); 'left'/'right': a fixed keep-side,
+   *  resolved against the doc origin so it is visually that side.
+   *  A keep-side rule turns opposing flows into lanes over time
+   *  (the world's traffic-side personality — protocol §4 sub-idea). */
+  keepSide?: 'self' | 'left' | 'right'
 }
 
 export const IMPEDED_LIMIT = 5 // e.g. "5 strikes → try another way"
@@ -144,35 +150,42 @@ function overlaps(a: Rect, b: Rect) {
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-/** §4 retreat: reflect the step backward and tilt to the side where
- *  the partner isn't. The sideways pick comes from geometry — each
- *  agent takes the side it already offsets to, so a head-on pair
- *  splits to opposite sides without any id hashing. A perfectly
- *  dead-on pair takes the left of each one's own approach axis —
- *  opposite axes, opposite lanes, still fully deterministic. */
-function retreatStep(mine: Desired, other: Desired): Pt {
+/** §4 retreat: reflect the step backward and tilt sideways.
+ *  keepSign ≠ 0 — fixed keep-side rule (protocol §4 sub-idea):
+ *  every agent sidesteps to the same rotational side of its own
+ *  heading, so opposing flows settle into lanes.
+ *  keepSign = 0 — the sideways pick comes from geometry: each agent
+ *  takes the side it already offsets to, so a head-on pair splits
+ *  to opposite sides without any id hashing. A perfectly dead-on
+ *  pair takes the left of each one's own approach axis — opposite
+ *  axes, opposite lanes, still fully deterministic. */
+function retreatStep(mine: Desired, other: Desired, keepSign: number): Pt {
   const cM = center(mine.o)
   const cO = center(other.o)
   const d = Math.hypot(mine.step.x, mine.step.y) || 1
   const fx = mine.step.x / d
   const fy = mine.step.y / d
-  const rx = cM.x - cO.x
-  const ry = cM.y - cO.y
-  let px = rx - (rx * fx + ry * fy) * fx
-  let py = ry - (rx * fx + ry * fy) * fy
-  const pl = Math.hypot(px, py)
-  if (pl < 1e-3) {
-    // dead head-on: take the left of the direction TOWARD the partner.
-    // The other member's axis points the opposite way, so "left of
-    // mine→other" lands them on opposite world sides — no id needed.
-    const ax = cO.x - cM.x
-    const ay = cO.y - cM.y
-    const al = Math.hypot(ax, ay) || 1
-    px = -ay / al
-    py = ax / al
+  let px: number
+  let py: number
+  if (keepSign !== 0) {
+    px = -fy * keepSign
+    py = fx * keepSign
   } else {
-    px /= pl
-    py /= pl
+    const rx = cM.x - cO.x
+    const ry = cM.y - cO.y
+    px = rx - (rx * fx + ry * fy) * fx
+    py = ry - (rx * fx + ry * fy) * fy
+    const pl = Math.hypot(px, py)
+    if (pl < 1e-3) {
+      const ax = cO.x - cM.x
+      const ay = cO.y - cM.y
+      const al = Math.hypot(ax, ay) || 1
+      px = -ay / al
+      py = ax / al
+    } else {
+      px /= pl
+      py /= pl
+    }
   }
   const bx = -fx + px * RETREAT_TILT
   const by = -fy + py * RETREAT_TILT
@@ -189,6 +202,17 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   const step = policy.step ?? 60
   const arrive = policy.arrive ?? 150
   const progressWindow = policy.progressWindow ?? PROGRESS_WINDOW
+  // keep-side sidestep: +1 rotates the forward vector +90° — which is
+  // "right" under a top-left (y-down) origin and "left" under
+  // bottom-left (y-up), so resolve per doc.origin for visual honesty.
+  // keepSide 'self' (default) keeps the geometric pick instead.
+  const keepSide = policy.keepSide ?? 'self'
+  const keepSign =
+    keepSide === 'self'
+      ? 0
+      : (keepSide === 'right') === (engine.doc.origin !== 'bottom-left')
+        ? 1
+        : -1
   const scoreOf = (o: WorldObject, g: Goal) =>
     policy.score?.(o, g) ?? g.score ?? 1
 
@@ -373,7 +397,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
             retreatLogged.add(pair)
             emit({ type: 'mutual-retreat', objectIds: [d.a.objectId, partner.a.objectId] })
           }
-          const r = retreatStep(d, partner)
+          const r = retreatStep(d, partner, keepSign)
           // jitter staggers re-approach so the sidestep holds (§7)
           d.a.yieldedUntil = now + YIELD_TICKS + jitterOf(d.a.objectId)
           bumpStress(d.a)
