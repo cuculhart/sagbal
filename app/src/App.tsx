@@ -3,7 +3,17 @@ import type { Engine, WorldObject } from '@kimetron/core'
 import type { StratumEvent } from '@kimetron/sagbal'
 import { createArbiter } from '@kimetron/sagbal'
 import { useEngine, useEngineVersion, IsleCanvas } from '@kimetron/react'
-import { GRID_CFG, PLAYER_ID, POSTS, WANDERER_IDS, policy, sampleObjects } from './model'
+import {
+  GRID_CFG,
+  IS_MAZE,
+  PLAYER_ID,
+  WANDERER_IDS,
+  activePosts,
+  mazeObjects,
+  mazeRoute,
+  policy,
+  sampleObjects,
+} from './model'
 
 /** Slime monster — wanderers. A wobbling dome with eyes. */
 function SlimeSvg({ color, name }: { color: string; name: string }) {
@@ -139,7 +149,7 @@ export function App() {
     // no snap-assist: object-edge snapping pulls the drag into walls
     // and makes the reject bounce feel like an invisible wall
     engine.snapObjects = false
-    engine.setDoc({ ...engine.doc, objects: sampleObjects() })
+    engine.setDoc({ ...engine.doc, objects: IS_MAZE ? mazeObjects() : sampleObjects() })
     engine.viewport = { x: 40, y: 40, zoom: 1 / 20 }
     engine.panBy(0, 0)
     for (const o of engine.doc.objects.filter((o) =>
@@ -147,8 +157,13 @@ export function App() {
     )) {
       arbiter.add(o)
       if (WANDERER_IDS.includes(o.id)) {
-        const p = POSTS[(WANDERER_IDS.indexOf(o.id) + 1) % POSTS.length]
-        arbiter.setGoal(o.id, { id: p.id, to: p.to, dwell: 40 })
+        const p = activePosts[(WANDERER_IDS.indexOf(o.id) + 1) % activePosts.length]
+        arbiter.setGoal(o.id, {
+          id: p.id,
+          to: p.to,
+          dwell: 40,
+          via: IS_MAZE ? mazeRoute(engine, o, p.to) : undefined,
+        })
       }
     }
   }, [engine, arbiter])
@@ -157,6 +172,15 @@ export function App() {
   useEffect(
     () =>
       arbiter.on((ev: StratumEvent) => {
+        // per-type event tally for stress measurement (?maze runs)
+        const w = window as unknown as {
+          __sagbalStats?: Record<string, number>
+          __sagbal?: typeof arbiter
+          __engine?: typeof engine
+        }
+        ;(w.__sagbalStats ??= {})[ev.type] = (w.__sagbalStats[ev.type] ?? 0) + 1
+        w.__sagbal = arbiter
+        w.__engine = engine
         setLog((l) => [describeEvent(ev), ...l.slice(0, 39)])
       }),
     [arbiter],
