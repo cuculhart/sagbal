@@ -28,6 +28,8 @@ App (policy)        goals, intent scores, route knowledge (gates),
                     next-goal rules — game vocabulary lives here
 SAGBAL (stratum)    intent gathering, score auctions, yield
                     hysteresis, via-points, impeded detection,
+                    deadlock cycles + asymmetric mutual retreat,
+                    livelock monitors, stress explosions,
                     suspended goals + wake conditions
 Kimetron Isle       physical truth only: footprints, solids,
                     tryMove success/failure, blocker identity
@@ -53,8 +55,11 @@ https://github.com/user-attachments/assets/78c925dd-203a-475f-9c76-adfd4f9b20b6
 - Six wanderers cycle between destination posts and linger ~3s on
   arrival; a partition with a single gate forces contention.
 - The player **P** is hand-dragged — same physical truth for everyone.
-- Watch the event log: `contention` / `yield` / `blocked by` /
-  `impeded` / `dwell` / `arrived` / `woke` pass through raw.
+- Watch the event log — three colors, three strata: `blocked by`
+  is raw Kimetron fact; `contention` / `yield` / `deadlock` /
+  `sidestep` / `explodes` / `repeat-block` / `no progress` are
+  phenomena SAGBAL assembled; `arrived` / `dwells` / `goal` switches
+  are app-side lifecycle.
 - Collisions are honest: units are invisible 16-gon footprints with
   app-drawn sprites on top. Drag P through the gate — walls refuse,
   openings don't.
@@ -74,10 +79,14 @@ npx vitest run              # tests
 
 ## Status
 
-v0.1 skeleton — intent gathering, score auctions, yield hysteresis,
-via-points, impeded detection, goal switching, and suspended-goal
-wake. Mutual retreat, diffusion, and live-lock detection are not
-yet implemented.
+v0.2 — intent gathering, score auctions, yield hysteresis,
+via-points, impeded detection, goal switching, suspended-goal wake,
+deadlock detection with asymmetric mutual retreat (both sides lose,
+each sidesteps to its own side of the lane), livelock monitors
+(same-blocker counts, progress-zero windows, deterministic
+re-approach jitter), and edge-triggered stress explosions.
+Diffusion (repulsion when fully boxed in) is not yet implemented —
+a `retreat-failed` fact is emitted for the app to interpret.
 
 ## License
 

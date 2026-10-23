@@ -1,6 +1,6 @@
 {
   "name": "@kimetron/sagbal",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "description": "SAGBAL — a stratum on Kimetron Isle. Movement arbitration between physics truth and app policy.",
   "type": "module",

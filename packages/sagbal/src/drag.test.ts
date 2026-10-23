@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Engine } from '@kimetron/core'
+import { Engine, type Pt } from '@kimetron/core'
 
 // reproduce the app world minimal: partition + unit P
 const objects = [

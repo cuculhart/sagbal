@@ -71,11 +71,47 @@ function UnitSprite({ engine, o, player }: { engine: Engine; o: WorldObject; pla
   )
 }
 
+/** Format an event and classify it by stratum: Kimetron facts are raw
+ *  physical truth passing through; stratum facts are phenomena SAGBAL
+ *  assembled; app entries are goal-lifecycle decisions this side owns. */
+function describeEvent(ev: StratumEvent): { text: string; cls: string } {
+  switch (ev.type) {
+    case 'blocked':
+      return { text: `${ev.objectId} blocked by ${ev.blockerId}`, cls: 'ev-fact' }
+    case 'contention':
+      return { text: `contention ${ev.objectIds.join(' vs ')} → ${ev.winnerId}`, cls: 'ev-stratum' }
+    case 'yield':
+      return { text: `${ev.objectId} yields to ${ev.toId}`, cls: 'ev-stratum' }
+    case 'deadlock':
+      return { text: `deadlock ${ev.objectIds.join(' ↔ ')}`, cls: 'ev-stratum' }
+    case 'mutual-retreat':
+      return { text: `${ev.objectIds.join(' + ')} sidestep`, cls: 'ev-stratum' }
+    case 'retreat-failed':
+      return { text: `${ev.objectIds.join(', ')} can't retreat`, cls: 'ev-stratum' }
+    case 'impeded':
+      return { text: `${ev.objectId} impeded x${ev.count} on ${ev.goalId}`, cls: 'ev-stratum' }
+    case 'explode':
+      return { text: `${ev.objectId} explodes (stress ${ev.stress})`, cls: 'ev-stratum' }
+    case 'repeat-block':
+      return { text: `${ev.objectId} blocked by ${ev.blockerId} x${ev.count}`, cls: 'ev-stratum' }
+    case 'progress-zero':
+      return { text: `${ev.objectId} no progress on ${ev.goalId} (${ev.ticks}t)`, cls: 'ev-stratum' }
+    case 'woke':
+      return { text: `${ev.objectId} woke ${ev.goalId}`, cls: 'ev-stratum' }
+    case 'arrived':
+      return { text: `${ev.objectId} arrived ${ev.goalId}`, cls: 'ev-app' }
+    case 'dwell':
+      return { text: `${ev.objectId} dwells at ${ev.goalId}`, cls: 'ev-app' }
+    case 'goal-switch':
+      return { text: `${ev.objectId} goal ${ev.from ?? '–'} → ${ev.to ?? '–'}`, cls: 'ev-app' }
+  }
+}
+
 export function App() {
   const engine = useEngine({ units: 'mm', origin: 'top-left', grid: GRID_CFG })
   useEngineVersion(engine)
   const [paused, setPaused] = useState(false)
-  const [log, setLog] = useState<string[]>([])
+  const [log, setLog] = useState<{ text: string; cls: string }[]>([])
 
   // The stratum: App → SAGBAL → Kimetron.
   // Wanderers move through arbiter intents; the player is direct-
@@ -110,23 +146,7 @@ export function App() {
   useEffect(
     () =>
       arbiter.on((ev: StratumEvent) => {
-        const line =
-          ev.type === 'contention'
-            ? `contention ${ev.objectIds.join(' vs ')} → ${ev.winnerId}`
-            : ev.type === 'blocked'
-              ? `${ev.objectId} blocked by ${ev.blockerId}`
-              : ev.type === 'yield'
-                ? `${ev.objectId} yields to ${ev.toId}`
-                : ev.type === 'impeded'
-                  ? `${ev.objectId} impeded x${ev.count} on ${ev.goalId}`
-                  : ev.type === 'dwell'
-                    ? `${ev.objectId} dwells at ${ev.goalId}`
-                    : ev.type === 'arrived'
-                    ? `${ev.objectId} arrived ${ev.goalId}`
-                    : ev.type === 'goal-switch'
-                      ? `${ev.objectId} goal ${ev.from ?? '–'} → ${ev.to ?? '–'}`
-                      : `${ev.objectId} woke ${ev.goalId}`
-        setLog((l) => [line, ...l.slice(0, 39)])
+        setLog((l) => [describeEvent(ev), ...l.slice(0, 39)])
       }),
     [arbiter],
   )
@@ -169,14 +189,20 @@ export function App() {
         </div>
         <aside className="side">
           <h2>stratum events</h2>
+          <p className="legend">
+            <span className="ev-fact">kimetron</span>
+            <span className="ev-stratum">sagbal</span>
+            <span className="ev-app">app</span>
+          </p>
           {log.map((l, i) => (
-            <div className="ev" key={i}>
-              {l}
+            <div className={`ev ${l.cls}`} key={i}>
+              {l.text}
             </div>
           ))}
           <p className="hint">
-            Wanderers A–D cycle between the six posts (blue squares) and
-            linger a few seconds on arrival — watch them contest the gate.
+            Wanderers A–F cycle between the six posts (blue squares) and
+            linger a few seconds on arrival — watch them contest the gate,
+            sidestep head-on jams, and explode through when they must.
             Drag the purple unit P through the jam; the wanderers will
             yield, step back, and reroute around it.
           </p>
