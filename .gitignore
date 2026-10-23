@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+Thumbs.db
+
+# recorded demo videos — hosted via user-attachments, not in git
+docs/*.webm
+docs/*.mp4

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SAGBAL — a stratum on Kimetron Isle</title>
+    <style>
+      body { margin: 0; font: 14px/1.6 system-ui, sans-serif; color: #1c2733; }
+      .app { display: flex; flex-direction: column; height: 100vh; }
+      .bar {
+        display: flex; align-items: center; gap: 12px;
+        padding: 8px 14px; border-bottom: 1px solid #cfd8e0;
+      }
+      .bar .sub { color: #667; }
+      .bar button { margin-left: auto; }
+      .main { display: flex; flex: 1; min-height: 0; }
+      .stage { position: relative; flex: 1; min-width: 0; }
+      .ki-canvas { flex: 1; position: relative; overflow: hidden; }
+      .unit-sprite { position: absolute; pointer-events: none; z-index: 10; }
+      /* game surface: P is draggable but not resizable/rotatable —
+         hide the edit chrome so those gestures can't start */
+      .ki-canvas .ki-handle,
+      .ki-canvas .ki-rot,
+      .ki-canvas .ki-bend,
+      .ki-canvas .ki-port { display: none; }
+      .side {
+        width: 280px; border-left: 1px solid #cfd8e0; padding: 10px 14px;
+        font-size: 12px; overflow-y: auto;
+      }
+      .side h2 { font-size: 13px; margin: 0 0 8px; }
+      .ev { padding: 3px 0; border-bottom: 1px solid #eef2f5; color: #456; }
+      .ev b { color: #1c2733; }
+      .hint { color: #889; font-size: 11px; margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
