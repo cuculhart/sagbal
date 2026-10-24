@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-25
+
+### Added
+
+- `@kimetron/sagbal`: per-goal pace — `Goal.step` overrides
+  `Policy.step` for the units pursuing that goal, so an app can make
+  individuals crawl (wounded, hauling, old age) while everyone else
+  walks. The stratum never moves any unit farther than its own
+  effective step per tick: intents, sidesteps, push-asides and the
+  §5 repulsion shove all respect it, and the wall-pressed check
+  measures against the unit's own step (requested by a downstream
+  game for dying units)
+- `@kimetron/sagbal`: the remaining tuning constants are
+  policy-tunable — `yieldTicks`, `stressExplode`, `stressBonus`,
+  `impededLimit`, `repeatBlockN`, `jitterMax`, `retreatTilt`,
+  `minMoveRatio`, `progressEps`, `diffuseCooldown` join the existing
+  `step`/`arrive`/`progressWindow`/`keepSide`/density overrides
+
+### Changed
+
+- `@kimetron/sagbal`: `diffuse` facts are throttled per
+  boxed→pushed pair — a boxed unit keeps radiating the repulsion
+  field every tick as before, but the fact repeats at most every
+  `diffuseCooldown` ticks (default 8) per pair instead of every tick
+
 ## [0.5.0] - 2026-10-25
 
 ### Fixed

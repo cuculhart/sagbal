@@ -18,6 +18,8 @@ import type { Engine, Pt, Rect, WorldObject } from '@kimetron/core'
  * alone sidesteps; a tie keeps the mutual retreat), keep-side
  * sidestep convention, external intents (the hand-dragged player
  * bids like everyone else — it just can't be moved by the stratum).
+ * v0.6: per-goal step overrides, policy-tunable tuning constants,
+ * diffuse facts throttled per pair (the push itself stays continuous).
  * See idea/garakuta/sagbal/protocol.md for the full design.
  */
 
@@ -25,6 +27,10 @@ import type { Engine, Pt, Rect, WorldObject } from '@kimetron/core'
 export interface Goal {
   id: string
   to: Pt
+  /** per-goal step override (world units per tick) — the layer
+      carries the number like `score`; what it means (wounded,
+      hauling, old age) stays App-side. Defaults to Policy.step */
+  step?: number
   /** game-meaning weight; Policy.score overrides */
   score?: number
   deadline?: number
@@ -130,6 +136,29 @@ export interface Policy {
   /** §8 neighbor count that reports `full` — unresolvable congestion
    *  (default 8 — the packed 3×3 grid, self included) */
   fullN?: number
+  /** yield hysteresis — ticks a loser keeps yielding (§3, default 8) */
+  yieldTicks?: number
+  /** stress ticks until an explosion (§3, default 12) */
+  stressExplode?: number
+  /** explosion bonus — can outbid static scores (§3, default 100) */
+  stressBonus?: number
+  /** consecutive impeded ticks before a goal-switch fact (default 5) */
+  impededLimit?: number
+  /** report every Nth same-blocker obstruction (§7, default 3) */
+  repeatBlockN?: number
+  /** max extra yield ticks after a mutual retreat (§7, default 4) */
+  jitterMax?: number
+  /** §4 sidestep lateral:backward mix (default 0.84 ≈ 40°) */
+  retreatTilt?: number
+  /** fraction of the step below which a slide counts as wall-pressed
+   *  (default 0.25) */
+  minMoveRatio?: number
+  /** world units of distance improvement that count for §7 progress
+   *  (default 1) */
+  progressEps?: number
+  /** §5 ticks between repeat `diffuse` facts for the same pair —
+   *  the push itself stays continuous (default 8) */
+  diffuseCooldown?: number
 }
 
 export const IMPEDED_LIMIT = 5 // e.g. "5 strikes → try another way"
@@ -146,12 +175,13 @@ const DIFFUSE_RADIUS = 600 // §5 repulsion field reach (world units)
 const CROWD_RADIUS = 450 // §8 crowd neighborhood (≈3×3 unit grid, center dist)
 const CROWD_N = 7 // §8 warning level — 8/9 occupancy of the packed grid
 const FULL_N = 8 // §8 unresolvable — packed 3×3, self included
+const DIFFUSE_COOLDOWN = 8 // §5 ticks between repeat diffuse facts per pair
 
 /** deterministic per-id jitter — never Math.random, replays must match */
-function jitterOf(id: string): number {
+function jitterOf(id: string, max: number): number {
   let h = 5381
   for (let i = 0; i < id.length; i++) h = ((h << 5) + h + id.charCodeAt(i)) >>> 0
-  return h % (JITTER_MAX + 1)
+  return h % (max + 1)
 }
 
 export interface Arbiter {
@@ -204,6 +234,7 @@ function retreatStep(
   mine: { o: WorldObject; step: Pt },
   other: { o: WorldObject; step: Pt },
   keepSign: number,
+  tilt: number,
 ): Pt {
   const cM = center(mine.o)
   const cO = center(other.o)
@@ -232,8 +263,8 @@ function retreatStep(
       py /= pl
     }
   }
-  const bx = -fx + px * RETREAT_TILT
-  const by = -fy + py * RETREAT_TILT
+  const bx = -fx + px * tilt
+  const by = -fy + py * tilt
   const bl = Math.hypot(bx, by) || 1
   return { x: (bx / bl) * d, y: (by / bl) * d }
 }
@@ -252,6 +283,21 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   const crowdRadius = policy.crowdRadius ?? CROWD_RADIUS
   const crowdN = policy.crowdN ?? CROWD_N
   const fullN = policy.fullN ?? FULL_N
+  // tuning constants resolve once at creation — tuning is App work,
+  // so the constants are App vocabulary too (policy.X ?? default)
+  const yieldTicks = policy.yieldTicks ?? YIELD_TICKS
+  const stressExplode = policy.stressExplode ?? STRESS_EXPLODE
+  const stressBonus = policy.stressBonus ?? STRESS_BONUS
+  const impededLimit = policy.impededLimit ?? IMPEDED_LIMIT
+  const repeatBlockN = policy.repeatBlockN ?? REPEAT_BLOCK_N
+  const jitterMax = policy.jitterMax ?? JITTER_MAX
+  const retreatTilt = policy.retreatTilt ?? RETREAT_TILT
+  const minMoveRatio = policy.minMoveRatio ?? MIN_MOVE_RATIO
+  const progressEps = policy.progressEps ?? PROGRESS_EPS
+  const diffuseCooldown = policy.diffuseCooldown ?? DIFFUSE_COOLDOWN
+  /** last `diffuse` fact per boxed→pushed pair — the repulsion push
+      stays continuous, only the fact is throttled */
+  const lastDiffuse = new Map<string, number>()
   // keep-side sidestep: +1 rotates the forward vector +90° — which is
   // "right" under a top-left (y-down) origin and "left" under
   // bottom-left (y-up), so resolve per doc.origin for visual honesty.
@@ -282,7 +328,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
 
   function bumpStress(a: AgentState) {
     a.stress++
-    if (a.stress >= STRESS_EXPLODE && !a.exploded) {
+    if (a.stress >= stressExplode && !a.exploded) {
       a.exploded = true
       emit({ type: 'explode', objectId: a.objectId, stress: a.stress })
     }
@@ -296,7 +342,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       a.sameBlock.blockerId === blockerId && a.sameBlock.goalId === goalId
         ? { blockerId, goalId, count: a.sameBlock.count + 1 }
         : { blockerId, goalId, count: 1 }
-    if (a.sameBlock.count % REPEAT_BLOCK_N === 0) {
+    if (a.sameBlock.count % repeatBlockN === 0) {
       emit({
         type: 'repeat-block',
         objectId: a.objectId,
@@ -309,13 +355,13 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   /** §5 boxed check — every cardinal step position is obstructed.
    *  "Wants to move but can't in any direction" is what starts the
    *  diffusion broadcast; a parked agent isn't boxed, it just sits. */
-  function isBoxed(id: string, o: WorldObject): boolean {
+  function isBoxed(id: string, o: WorldObject, reach: number): boolean {
     const r = rectOf(o)
     return [
-      { x: step, y: 0 },
-      { x: -step, y: 0 },
-      { x: 0, y: step },
-      { x: 0, y: -step },
+      { x: reach, y: 0 },
+      { x: -reach, y: 0 },
+      { x: 0, y: reach },
+      { x: 0, y: -reach },
     ].every(
       (c) =>
         engine.collisions(
@@ -403,13 +449,16 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           continue
         }
         const d = Math.hypot(dx, dy) || 1
-        const s = { x: (dx / d) * step, y: (dy / d) * step }
+        // per-goal pace — the layer carries the number like `score`;
+        // what a small step means (wounded, hauling) stays App-side
+        const effStep = a.goal.step ?? step
+        const s = { x: (dx / d) * effStep, y: (dy / d) * effStep }
         intents.push({
           a,
           o,
           step: s,
           rect: { x: o.x + s.x, y: o.y + s.y, w: o.w, h: o.h },
-          score: scoreOf(o, a.goal) + (a.stress >= STRESS_EXPLODE ? STRESS_BONUS : 0),
+          score: scoreOf(o, a.goal) + (a.stress >= stressExplode ? stressBonus : 0),
         })
         // §7 progress monitor — distance to the current waypoint is
         // recorded only while the agent is actually trying (yielded
@@ -419,7 +468,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         if (a.distHist.length > progressWindow) a.distHist.shift()
         if (
           a.distHist.length === progressWindow &&
-          a.distHist.every((v) => v >= a.distHist[0] - PROGRESS_EPS)
+          a.distHist.every((v) => v >= a.distHist[0] - progressEps)
         ) {
           emit({ type: 'progress-zero', objectId: a.objectId, goalId: a.goal.id, ticks: progressWindow })
           a.distHist = []
@@ -512,10 +561,11 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           const dx = cO.x - cE.x
           const dy = cO.y - cE.y
           const dd = Math.hypot(dx, dy) || 1
+          const aStep = a.goal?.step ?? step
           const ok =
-            engine.tryMove(a.objectId, (dx / dd) * step, (dy / dd) * step) ||
-            engine.tryMove(a.objectId, (dx / dd) * step, 0) ||
-            engine.tryMove(a.objectId, 0, (dy / dd) * step)
+            engine.tryMove(a.objectId, (dx / dd) * aStep, (dy / dd) * aStep) ||
+            engine.tryMove(a.objectId, (dx / dd) * aStep, 0) ||
+            engine.tryMove(a.objectId, 0, (dy / dd) * aStep)
           if (ok) emit({ type: 'yield', objectId: a.objectId, toId: e.id })
         }
       }
@@ -552,9 +602,9 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
               emit({ type: 'mutual-retreat', objectIds: [d.a.objectId, rw.id] })
             }
           }
-          const r = retreatStep(d, rw, keepSign)
+          const r = retreatStep(d, rw, keepSign, retreatTilt)
           // jitter staggers re-approach so the sidestep holds (§7)
-          d.a.yieldedUntil = now + YIELD_TICKS + jitterOf(d.a.objectId)
+          d.a.yieldedUntil = now + yieldTicks + jitterOf(d.a.objectId, jitterMax)
           bumpStress(d.a)
           recordBlock(d.a, rw.id)
           const ok =
@@ -571,7 +621,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         if (losers.has(d.a.objectId)) {
           // Losers don't just stand — they step back to open space
           // (protocol §4 repel, simplified: retreat along own step).
-          d.a.yieldedUntil = now + YIELD_TICKS
+          d.a.yieldedUntil = now + yieldTicks
           bumpStress(d.a)
           engine.tryMove(d.a.objectId, -d.step.x, -d.step.y) ||
             engine.tryMove(d.a.objectId, -d.step.x, 0) ||
@@ -585,10 +635,12 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         // still impeded — creeping along a face is not progress
         const moved = obj(d.a.objectId)
         const dist = moved ? Math.hypot(moved.x - d.o.x, moved.y - d.o.y) : 0
-        if (dist >= step * MIN_MOVE_RATIO) {
+        // wall-pressed is measured against the agent's OWN step — a
+        // half-speed goal that moves half a step is not wall-pressed
+        if (dist >= Math.hypot(d.step.x, d.step.y) * minMoveRatio) {
           d.a.impeded = 0
           d.a.stress = Math.max(0, d.a.stress - 1)
-          if (d.a.stress < STRESS_EXPLODE) d.a.exploded = false
+          if (d.a.stress < stressExplode) d.a.exploded = false
           continue
         }
         // a desired rect can overlap several solids — walls register
@@ -608,11 +660,11 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         bumpStress(d.a)
         // wants to move but every direction is obstructed — §5 broadcast
         const o2 = obj(d.a.objectId)
-        if (o2 && isBoxed(d.a.objectId, o2)) {
+        if (o2 && isBoxed(d.a.objectId, o2, Math.hypot(d.step.x, d.step.y))) {
           if (!d.a.boxed) emit({ type: 'boxed', objectId: d.a.objectId })
           d.a.boxed = true
         }
-        if (d.a.impeded >= IMPEDED_LIMIT && d.a.goal) {
+        if (d.a.impeded >= impededLimit && d.a.goal) {
           emit({ type: 'impeded', objectId: d.a.objectId, count: d.a.impeded, goalId: d.a.goal.id })
           adopt(d.a, policy.nextGoal?.(d.a, engine), now)
         }
@@ -624,8 +676,10 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       for (const a of agents.values()) {
         if (!a.boxed) continue
         const o = obj(a.objectId)
-        if (!o || !isBoxed(a.objectId, o)) {
+        if (!o || !isBoxed(a.objectId, o, a.goal?.step ?? step)) {
           a.boxed = false
+          for (const k of lastDiffuse.keys())
+            if (k.startsWith(a.objectId + '')) lastDiffuse.delete(k)
           continue
         }
         const cb = center(o)
@@ -638,14 +692,22 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           const dy = cn.y - cb.y
           const dist = Math.hypot(dx, dy)
           if (dist < 1e-3 || dist >= diffuseRadius) continue
-          const g = (step * (1 - dist / diffuseRadius)) // closer = harder push
+          // the pushed agent's own step caps the shove — the stratum
+          // moves nobody farther than their own stride per tick
+          const g = (b.goal?.step ?? step) * (1 - dist / diffuseRadius) // closer = harder push
           const px = (dx / dist) * g
           const py = (dy / dist) * g
           const moved =
             engine.tryMove(b.objectId, px, py) ||
             engine.tryMove(b.objectId, px, 0) ||
             engine.tryMove(b.objectId, 0, py)
-          if (moved) emit({ type: 'diffuse', objectId: b.objectId, fromId: a.objectId })
+          if (moved) {
+            const key = a.objectId + '' + b.objectId
+            if (now - (lastDiffuse.get(key) ?? -Infinity) >= diffuseCooldown) {
+              lastDiffuse.set(key, now)
+              emit({ type: 'diffuse', objectId: b.objectId, fromId: a.objectId })
+            }
+          }
         }
       }
 

@@ -377,3 +377,116 @@ describe('blocked attribution (v0.5)', () => {
     expect(b && b.type === 'blocked' && b.blockerIds).toEqual(['wS'])
   })
 })
+
+describe('Goal.step — per-goal pace (v0.6)', () => {
+  it('a goal-level step overrides the policy step', () => {
+    // uA crawls at half pace, uB walks at the default
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 1000, 1400)
+    const { engine, arbiter } = setup([uA, uB])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 }, step: 30 })
+    arbiter.setGoal('uB', { id: 'gE', to: { x: 3000, y: 1550 } })
+
+    arbiter.tick()
+
+    expect(obj(engine, 'uA').x).toBe(1030) // 1000 + 30
+    expect(obj(engine, 'uB').x).toBe(1060) // 1000 + 60
+  })
+
+  it('a slow unit that actually moves is not wall-pressed', () => {
+    // goal.step=10 < policy.step×0.25 — moving 10 is real progress,
+    // not a sub-ratio wall-press that would report blocked
+    const uA = unit('uA', 1000, 1000)
+    const { arbiter, events } = setup([uA])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 }, step: 10 })
+
+    arbiter.tick()
+
+    expect(events.some((e) => e.type === 'blocked')).toBe(false)
+  })
+
+  it('diffusion pushes a slow neighbor no farther than its own step', () => {
+    // boxed uA radiates; uB wants south (blocked) with step=10 — the
+    // field may shove it at most 10 per tick, not the policy 60
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 1300, 1000)
+    const { engine, arbiter, events } = setup([
+      wall('wN', 600, 700, 2000, 300),
+      wall('wS', 600, 1300, 2000, 300),
+      wall('wW', 880, 700, 120, 900),
+      uA,
+      uB,
+    ])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 } })
+    arbiter.setGoal('uB', { id: 'gS', to: { x: 1450, y: 2500 }, step: 10 })
+
+    arbiter.tick()
+
+    expect(events.some((e) => e.type === 'diffuse' && e.objectId === 'uB')).toBe(true)
+    const b = obj(engine, 'uB')
+    expect(b.x - 1300).toBeLessThanOrEqual(10 + 1e-6)
+    expect(b.x).toBeGreaterThan(1300)
+  })
+})
+
+describe('policy-tunable constants (v0.6)', () => {
+  it('stressExplode override fires the explosion earlier', () => {
+    const uA = unit('uA', 1000, 1000)
+    const wS = wall('wS', 0, 1300, 4400, 120)
+    const { arbiter, events } = setup([uA, wS], { stressExplode: 3 })
+    arbiter.setGoal('uA', { id: 'gS', to: { x: 1150, y: 2000 } })
+
+    for (let i = 0; i < 3; i++) arbiter.tick()
+
+    const ex = events.filter((e) => e.type === 'explode')
+    expect(ex).toHaveLength(1)
+    expect(ex[0]).toMatchObject({ objectId: 'uA', stress: 3 })
+  })
+
+  it('impededLimit override switches goals sooner', () => {
+    const uA = unit('uA', 1000, 1000)
+    const wS = wall('wS', 0, 1300, 4400, 120)
+    const { arbiter, events } = setup([uA, wS], { impededLimit: 2 })
+    arbiter.setGoal('uA', { id: 'gS', to: { x: 1150, y: 2000 } })
+
+    for (let i = 0; i < 2; i++) arbiter.tick()
+
+    expect(events.some((e) => e.type === 'impeded' && e.count === 2)).toBe(true)
+    expect(events.some((e) => e.type === 'goal-switch')).toBe(true)
+  })
+})
+
+describe('diffuse fact cooldown (v0.6)', () => {
+  // boxed uA radiates; parked uB is pushed east until it leaves the
+  // field. The push happens every tick — only the fact is throttled.
+  const run = (diffuseCooldown: number) => {
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 1300, 1000)
+    const { engine, arbiter, events } = setup(
+      [
+        wall('wN', 600, 700, 2000, 300),
+        wall('wS', 600, 1300, 2000, 300),
+        wall('wW', 880, 700, 120, 900),
+        uA,
+        uB,
+      ],
+      { diffuseCooldown },
+    )
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 } })
+    for (let i = 0; i < 10; i++) arbiter.tick()
+    return { b: obj(engine, 'uB'), events }
+  }
+
+  it('throttles the fact per pair while the push stays continuous', () => {
+    const fast = run(1)
+    const slow = run(8)
+    const dFast = fast.events.filter((e) => e.type === 'diffuse')
+    const dSlow = slow.events.filter((e) => e.type === 'diffuse')
+    // uB escapes the boxed probe after ~3 pushes — every push reports
+    expect(dFast.length).toBe(3)
+    // throttled: only the first push reports
+    expect(dSlow.length).toBe(1)
+    // the physical push itself is identical either way
+    expect(fast.b.x).toBe(slow.b.x)
+  })
+})

@@ -94,6 +94,11 @@ npx vitest run              # tests
 
 ## Status
 
+v0.6.0 — per-goal pace (`Goal.step` lets individual units crawl at
+their own stride), the remaining tuning constants become
+policy-tunable, and `diffuse` facts are throttled per pair while the
+repulsion push itself stays continuous.
+
 v0.5.0 — fixes blocker attribution: when a refused step overlaps
 several solids at once (e.g. a wall and a unit), `blocked` now names
 a negotiable blocker — a registered agent or external intent — rather
