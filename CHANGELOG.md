@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-25
+
+### Fixed
+
+- `@kimetron/sagbal`: `arbiter.tick` cost collapse under crowds —
+  object lookups ran a linear `doc.objects` scan inside every
+  pairwise loop, so a wake rush of many goal-holding agents cost
+  O(agents²·doc) and could hold a frame past 100ms. Object access is
+  now a per-tick lazy index (rebuilt on any mutation or app
+  callback), and the deadlock/contention and local-density scans
+  take candidates from a uniform hash grid instead of all pairs.
+  Same inputs still emit the same events in the same order —
+  candidates are sorted back to the original pair order
+  (reported by a downstream game whose wake rushes stalled the frame)
+
 ## [0.6.0] - 2026-10-25
 
 ### Added

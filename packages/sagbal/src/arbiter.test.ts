@@ -490,3 +490,42 @@ describe('diffuse fact cooldown (v0.6)', () => {
     expect(fast.b.x).toBe(slow.b.x)
   })
 })
+
+describe('neighborhood-limited scans (v0.7)', () => {
+  it('finds every nearby pair in a scattered crowd', () => {
+    // two independent head-on collisions 2000 apart — both must be
+    // detected even though the candidate scan is neighborhood-limited
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 1320, 1000)
+    const uC = unit('uC', 3000, 2000)
+    const uD = unit('uD', 3320, 2000)
+    const { arbiter, events } = setup([uA, uB, uC, uD])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 5000, y: 1150 } })
+    arbiter.setGoal('uB', { id: 'gW', to: { x: 300, y: 1150 } })
+    arbiter.setGoal('uC', { id: 'gE', to: { x: 5000, y: 2150 } })
+    arbiter.setGoal('uD', { id: 'gW', to: { x: 2300, y: 2150 } })
+
+    arbiter.tick()
+
+    const dls = events.filter((e) => e.type === 'deadlock')
+    expect(dls).toHaveLength(2)
+  })
+
+  it('a dense crowd still arbitrates correctly at scale', () => {
+    // 100 units packed at 320 intervals all heading east — overlapping
+    // desired rects must produce verdicts; the grid covers them all
+    const units = []
+    for (let r = 0; r < 10; r++)
+      for (let c = 0; c < 10; c++)
+        units.push(unit(`u${r}x${c}`, 400 + c * 320, 400 + r * 320))
+    const { arbiter, events } = setup(units)
+    for (const u of units)
+      arbiter.setGoal(u.id, { id: 'gE', to: { x: 5000, y: u.y + 150 } })
+
+    for (let i = 0; i < 3; i++) arbiter.tick()
+
+    expect(
+      events.some((e) => e.type === 'contention' || e.type === 'deadlock'),
+    ).toBe(true)
+  })
+})

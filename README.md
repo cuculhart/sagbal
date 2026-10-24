@@ -94,6 +94,11 @@ npx vitest run              # tests
 
 ## Status
 
+v0.7.0 — fixes tick cost under crowds: object lookups became a
+per-tick index and the pairwise scans take candidates from a spatial
+grid, so a rush of many goal-holding agents no longer stalls the
+frame.
+
 v0.6.0 — per-goal pace (`Goal.step` lets individual units crawl at
 their own stride), the remaining tuning constants become
 policy-tunable, and `diffuse` facts are throttled per pair while the

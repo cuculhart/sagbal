@@ -1,7 +1,7 @@
 {
   "name": "sagbal-app",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,7 @@
     "@kimetron/core": "1.2.0",
     "@kimetron/dom": "1.2.0",
     "@kimetron/react": "1.2.0",
-    "@kimetron/sagbal": "0.6.0",
+    "@kimetron/sagbal": "0.7.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

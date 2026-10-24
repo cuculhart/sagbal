@@ -20,6 +20,8 @@ import type { Engine, Pt, Rect, WorldObject } from '@kimetron/core'
  * bids like everyone else — it just can't be moved by the stratum).
  * v0.6: per-goal step overrides, policy-tunable tuning constants,
  * diffuse facts throttled per pair (the push itself stays continuous).
+ * v0.7: per-tick object index + neighborhood-limited scans — the
+ * O(agents²·doc) tick cost collapses for large crowds.
  * See idea/garakuta/sagbal/protocol.md for the full design.
  */
 
@@ -273,8 +275,36 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   const agents = new Map<string, AgentState>()
   const externals = new Map<string, { to: Pt; score: number }>()
   const listeners = new Set<(ev: StratumEvent) => void>()
-  const emit = (ev: StratumEvent) => listeners.forEach((fn) => fn(ev))
   let now = 0
+
+  // per-tick object index — a lazy Map replaces the O(doc) find that
+  // sat inside every pairwise scan. Positions go stale on any doc
+  // mutation or app callback, so the index is dropped and rebuilt
+  // lazily on the next lookup.
+  let objCache: Map<string, WorldObject> | undefined
+  const stale = () => {
+    objCache = undefined
+  }
+  const obj = (id: string) => {
+    objCache ??= new Map(engine.doc.objects.map((o) => [o.id, o]))
+    return objCache.get(id)
+  }
+  const emit = (ev: StratumEvent) => {
+    listeners.forEach((fn) => fn(ev))
+    stale() // listeners are app code — the doc may have changed
+  }
+  /** run an app callback — wake/nextGoal/score may touch the doc */
+  const afterApp = <T>(fn: () => T): T => {
+    const r = fn()
+    stale()
+    return r
+  }
+  /** tryMove + index invalidation on success */
+  const tryMove = (...args: Parameters<Engine['tryMove']>) => {
+    const ok = engine.tryMove(...args)
+    if (ok) stale()
+    return ok
+  }
 
   const step = policy.step ?? 60
   const arrive = policy.arrive ?? 150
@@ -310,9 +340,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         ? 1
         : -1
   const scoreOf = (o: WorldObject, g: Goal) =>
-    policy.score?.(o, g) ?? g.score ?? 1
-
-  const obj = (id: string) => engine.doc.objects.find((o) => o.id === id)
+    afterApp(() => policy.score?.(o, g)) ?? g.score ?? 1
 
   function adopt(a: AgentState, goal: Goal | undefined, tick: number) {
     const from = a.goal?.id
@@ -399,7 +427,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       const a = agents.get(objectId)
       if (!a?.goal) return
       a.suspended.push({ goal: a.goal, wake })
-      adopt(a, policy.nextGoal?.(a, engine), now)
+      adopt(a, afterApp(() => policy.nextGoal?.(a, engine)), now)
     },
     setIntent(objectId, intent) {
       if (obj(objectId)) externals.set(objectId, intent)
@@ -415,11 +443,12 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
 
     tick() {
       now++
+      stale() // drop the index — the app may have touched the doc between ticks
       // 0. wake suspended goals whose conditions hold
       for (const a of agents.values()) {
-        const ready = a.suspended.filter((s) => s.wake?.(engine))
+        const ready = a.suspended.filter((s) => afterApp(() => s.wake?.(engine)))
         if (!ready.length) continue
-        a.suspended = a.suspended.filter((s) => !s.wake?.(engine))
+        a.suspended = a.suspended.filter((s) => !afterApp(() => s.wake?.(engine)))
         for (const s of ready) emit({ type: 'woke', objectId: a.objectId, goalId: s.goal.id })
         if (!a.goal && ready.length) adopt(a, ready[0].goal, now)
       }
@@ -444,7 +473,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
             emit({ type: 'dwell', objectId: a.objectId, goalId: a.goal.id })
           } else {
             emit({ type: 'arrived', objectId: a.objectId, goalId: a.goal.id })
-            adopt(a, policy.nextGoal?.(a, engine), now)
+            adopt(a, afterApp(() => policy.nextGoal?.(a, engine)), now)
           }
           continue
         }
@@ -509,8 +538,40 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         { id: string; o: WorldObject; step: Pt; symmetric: boolean }
       >()
       const losers = new Set<string>()
+      // spatial index for the pairwise scans — a uniform hash grid
+      // over intent-phase positions prunes candidates to 3×3 cells.
+      // Pairs are sorted back into the original i<j order so the
+      // same scenario emits the same events in the same order.
+      const maxDim = intents.reduce((m, d) => Math.max(m, d.o.w, d.o.h), 0)
+      const stepMax = intents.reduce(
+        (m, d) => Math.max(m, Math.hypot(d.step.x, d.step.y)),
+        step,
+      )
+      const pairCell = 2 * stepMax + maxDim
+      const pairCells = new Map<string, number[]>()
+      const pkey = (x: number, y: number) =>
+        `${Math.floor(x / pairCell)},${Math.floor(y / pairCell)}`
       for (let i = 0; i < intents.length; i++) {
-        for (let j = i + 1; j < intents.length; j++) {
+        const c = center(intents[i].o)
+        const k = pkey(c.x, c.y)
+        ;(pairCells.get(k) ?? pairCells.set(k, []).get(k)!).push(i)
+      }
+      const pairs: [number, number][] = []
+      for (let i = 0; i < intents.length; i++) {
+        const c = center(intents[i].o)
+        const gx = Math.floor(c.x / pairCell)
+        const gy = Math.floor(c.y / pairCell)
+        for (let gx2 = gx - 1; gx2 <= gx + 1; gx2++) {
+          for (let gy2 = gy - 1; gy2 <= gy + 1; gy2++) {
+            for (const j of pairCells.get(`${gx2},${gy2}`) ?? []) {
+              if (j > i) pairs.push([i, j])
+            }
+          }
+        }
+      }
+      pairs.sort((a, b) => a[0] - b[0] || a[1] - b[1])
+      for (const [i, j] of pairs) {
+        {
           const p = intents[i]
           const q = intents[j]
           if (retreatWith.has(p.a.objectId) || retreatWith.has(q.a.objectId)) continue
@@ -563,9 +624,9 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           const dd = Math.hypot(dx, dy) || 1
           const aStep = a.goal?.step ?? step
           const ok =
-            engine.tryMove(a.objectId, (dx / dd) * aStep, (dy / dd) * aStep) ||
-            engine.tryMove(a.objectId, (dx / dd) * aStep, 0) ||
-            engine.tryMove(a.objectId, 0, (dy / dd) * aStep)
+            tryMove(a.objectId, (dx / dd) * aStep, (dy / dd) * aStep) ||
+            tryMove(a.objectId, (dx / dd) * aStep, 0) ||
+            tryMove(a.objectId, 0, (dy / dd) * aStep)
           if (ok) emit({ type: 'yield', objectId: a.objectId, toId: e.id })
         }
       }
@@ -573,8 +634,8 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       // 3. contention — overlapping desired rects bid by score;
       //    the winner is the consensus (protocol §2). Losers yield.
       //    Deadlocked agents are out of the auction: they sidestep.
-      for (let i = 0; i < intents.length; i++) {
-        for (let j = i + 1; j < intents.length; j++) {
+      for (const [i, j] of pairs) {
+        {
           const p = intents[i]
           const q = intents[j]
           if (retreatWith.has(p.a.objectId) || retreatWith.has(q.a.objectId)) continue
@@ -608,9 +669,9 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           bumpStress(d.a)
           recordBlock(d.a, rw.id)
           const ok =
-            engine.tryMove(d.a.objectId, r.x, r.y) ||
-            engine.tryMove(d.a.objectId, r.x, 0) ||
-            engine.tryMove(d.a.objectId, 0, r.y)
+            tryMove(d.a.objectId, r.x, r.y) ||
+            tryMove(d.a.objectId, r.x, 0) ||
+            tryMove(d.a.objectId, 0, r.y)
           // every direction blocked — the §5 broadcast starts here
           if (!ok) {
             emit({ type: 'retreat-failed', objectIds: [d.a.objectId] })
@@ -623,14 +684,14 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           // (protocol §4 repel, simplified: retreat along own step).
           d.a.yieldedUntil = now + yieldTicks
           bumpStress(d.a)
-          engine.tryMove(d.a.objectId, -d.step.x, -d.step.y) ||
-            engine.tryMove(d.a.objectId, -d.step.x, 0) ||
-            engine.tryMove(d.a.objectId, 0, -d.step.y)
+          tryMove(d.a.objectId, -d.step.x, -d.step.y) ||
+            tryMove(d.a.objectId, -d.step.x, 0) ||
+            tryMove(d.a.objectId, 0, -d.step.y)
           continue
         }
-        engine.tryMove(d.a.objectId, d.step.x, d.step.y) ||
-          engine.tryMove(d.a.objectId, d.step.x, 0) ||
-          engine.tryMove(d.a.objectId, 0, d.step.y)
+        tryMove(d.a.objectId, d.step.x, d.step.y) ||
+          tryMove(d.a.objectId, d.step.x, 0) ||
+          tryMove(d.a.objectId, 0, d.step.y)
         // wall-pressed check: a "successful" slide that barely moves is
         // still impeded — creeping along a face is not progress
         const moved = obj(d.a.objectId)
@@ -666,7 +727,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         }
         if (d.a.impeded >= impededLimit && d.a.goal) {
           emit({ type: 'impeded', objectId: d.a.objectId, count: d.a.impeded, goalId: d.a.goal.id })
-          adopt(d.a, policy.nextGoal?.(d.a, engine), now)
+          adopt(d.a, afterApp(() => policy.nextGoal?.(d.a, engine)), now)
         }
       }
 
@@ -698,9 +759,9 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           const px = (dx / dist) * g
           const py = (dy / dist) * g
           const moved =
-            engine.tryMove(b.objectId, px, py) ||
-            engine.tryMove(b.objectId, px, 0) ||
-            engine.tryMove(b.objectId, 0, py)
+            tryMove(b.objectId, px, py) ||
+            tryMove(b.objectId, px, 0) ||
+            tryMove(b.objectId, 0, py)
           if (moved) {
             const key = a.objectId + '' + b.objectId
             if (now - (lastDiffuse.get(key) ?? -Infinity) >= diffuseCooldown) {
@@ -713,18 +774,36 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
 
       // 6. §8 local density — neighbors within crowdRadius; report on
       //    level transitions only. `full` is the "unresolvable" fact —
-      //    what the App does with it stays App-side.
+      //    what the App does with it stays App-side. Candidates come
+      //    from a per-tick hash grid over post-move positions instead
+      //    of an all-pairs scan.
+      const agentCells = new Map<string, string[]>()
+      const ckey = (x: number, y: number) =>
+        `${Math.floor(x / crowdRadius)},${Math.floor(y / crowdRadius)}`
       for (const a of agents.values()) {
         const o = obj(a.objectId)
         if (!o) continue
         const c = center(o)
+        const k = ckey(c.x, c.y)
+        ;(agentCells.get(k) ?? agentCells.set(k, []).get(k)!).push(a.objectId)
+      }
+      for (const a of agents.values()) {
+        const o = obj(a.objectId)
+        if (!o) continue
+        const c = center(o)
+        const gx = Math.floor(c.x / crowdRadius)
+        const gy = Math.floor(c.y / crowdRadius)
         let n = 0
-        for (const b of agents.values()) {
-          if (b.objectId === a.objectId) continue
-          const ob = obj(b.objectId)
-          if (!ob) continue
-          const cn = center(ob)
-          if (Math.hypot(cn.x - c.x, cn.y - c.y) <= crowdRadius) n++
+        for (let gx2 = gx - 1; gx2 <= gx + 1; gx2++) {
+          for (let gy2 = gy - 1; gy2 <= gy + 1; gy2++) {
+            for (const id of agentCells.get(`${gx2},${gy2}`) ?? []) {
+              if (id === a.objectId) continue
+              const ob = obj(id)
+              if (!ob) continue
+              const cn = center(ob)
+              if (Math.hypot(cn.x - c.x, cn.y - c.y) <= crowdRadius) n++
+            }
+          }
         }
         const lvl = n >= fullN ? 2 : n >= crowdN ? 1 : 0
         if (lvl === a.crowd) continue
