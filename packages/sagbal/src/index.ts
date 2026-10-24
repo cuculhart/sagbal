@@ -69,7 +69,10 @@ export interface AgentState {
 
 /** Facts SAGBAL reports upward. Interpretation vocabulary stays App-side. */
 export type StratumEvent =
-  | { type: 'blocked'; objectId: string; blockerId: string }
+  /** move refused — blockerId prefers a negotiable blocker (an arbiter
+   *  agent or external intent) over doc order; blockerIds lists every
+   *  solid overlap in doc order (the raw fact) */
+  | { type: 'blocked'; objectId: string; blockerId: string; blockerIds: string[] }
   | { type: 'contention'; objectIds: string[]; winnerId: string }
   | { type: 'yield'; objectId: string; toId: string }
   | { type: 'impeded'; objectId: string; count: number; goalId: string }
@@ -588,10 +591,18 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
           if (d.a.stress < STRESS_EXPLODE) d.a.exploded = false
           continue
         }
-        const blocker = engine
-          .collisions(d.rect, new Set([d.a.objectId]))
-          .find((b) => b.id !== d.a.objectId)
-        emit({ type: 'blocked', objectId: d.a.objectId, blockerId: blocker?.id ?? '' })
+        // a desired rect can overlap several solids — walls register
+        // first in doc order and would mask the unit actually in the
+        // way, so prefer a blocker the stratum can negotiate with
+        const hits = engine.collisions(d.rect, new Set([d.a.objectId]))
+        const blocker =
+          hits.find((h) => agents.has(h.id) || externals.has(h.id)) ?? hits[0]
+        emit({
+          type: 'blocked',
+          objectId: d.a.objectId,
+          blockerId: blocker?.id ?? '',
+          blockerIds: hits.map((h) => h.id),
+        })
         recordBlock(d.a, blocker?.id ?? '')
         d.a.impeded++
         bumpStress(d.a)

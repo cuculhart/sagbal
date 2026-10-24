@@ -87,7 +87,12 @@ function UnitSprite({ engine, o, player }: { engine: Engine; o: WorldObject; pla
 function describeEvent(ev: StratumEvent): { text: string; cls: string } {
   switch (ev.type) {
     case 'blocked':
-      return { text: `${ev.objectId} blocked by ${ev.blockerId}`, cls: 'ev-fact' }
+      return {
+        text: `${ev.objectId} blocked by ${ev.blockerId}${
+          ev.blockerIds.length > 1 ? ` (+${ev.blockerIds.length - 1})` : ''
+        }`,
+        cls: 'ev-fact',
+      }
     case 'contention':
       return { text: `contention ${ev.objectIds.join(' vs ')} → ${ev.winnerId}`, cls: 'ev-stratum' }
     case 'yield':

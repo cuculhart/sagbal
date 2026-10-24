@@ -325,3 +325,55 @@ describe('§7 livelock monitors', () => {
     expect(pz[0]).toMatchObject({ objectId: 'uA', goalId: 'gS', ticks: 4 })
   })
 })
+
+describe('blocked attribution (v0.5)', () => {
+  it('prefers a negotiable blocker over a doc-first wall', () => {
+    // uA pushes east; its desired rect overlaps BOTH a wall and the
+    // parked agent uX. Doc order puts the wall first, but the unit is
+    // the blocker the stratum can actually negotiate with
+    const uA = unit('uA', 1000, 1000)
+    const uX = unit('uX', 1200, 1000) // parked — no goal
+    const { arbiter, events } = setup([
+      wall('wX', 1300, 1000, 300, 300),
+      uA,
+      uX,
+    ])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 } })
+
+    arbiter.tick()
+
+    const b = events.find((e) => e.type === 'blocked')
+    expect(b && b.type === 'blocked' && b.blockerId).toBe('uX')
+    expect(b && b.type === 'blocked' && b.blockerIds).toEqual(['wX', 'uX'])
+  })
+
+  it('repeat-block counts the negotiable blocker, not the wall', () => {
+    const uA = unit('uA', 1000, 1000)
+    const uX = unit('uX', 1200, 1000)
+    const { arbiter, events } = setup([
+      wall('wX', 1300, 1000, 300, 300),
+      uA,
+      uX,
+    ])
+    arbiter.setGoal('uA', { id: 'gE', to: { x: 3000, y: 1150 } })
+
+    for (let i = 0; i < 3; i++) arbiter.tick()
+
+    const rb = events.filter((e) => e.type === 'repeat-block')
+    expect(rb.length).toBeGreaterThan(0)
+    expect(rb[0]).toMatchObject({ objectId: 'uA', blockerId: 'uX', count: 3 })
+  })
+
+  it('a wall-only hit still attributes the wall and lists it', () => {
+    const uA = unit('uA', 1000, 1000)
+    const wS = wall('wS', 0, 1300, 4400, 120)
+    const { arbiter, events } = setup([uA, wS])
+    arbiter.setGoal('uA', { id: 'gS', to: { x: 1150, y: 2000 } })
+
+    arbiter.tick()
+
+    const b = events.find((e) => e.type === 'blocked')
+    expect(b && b.type === 'blocked' && b.blockerId).toBe('wS')
+    expect(b && b.type === 'blocked' && b.blockerIds).toEqual(['wS'])
+  })
+})

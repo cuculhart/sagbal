@@ -94,6 +94,13 @@ npx vitest run              # tests
 
 ## Status
 
+v0.5.0 — fixes blocker attribution: when a refused step overlaps
+several solids at once (e.g. a wall and a unit), `blocked` now names
+a negotiable blocker — a registered agent or external intent — rather
+than whatever was registered first in doc order (usually a wall).
+The event also carries `blockerIds` listing every solid overlap, and
+`repeat-block` counts the negotiable blocker.
+
 v0.4.0 — intent gathering, score auctions, yield hysteresis,
 via-points, impeded detection, goal switching, suspended-goal wake,
 deadlocks that join the consensus (score gap → loser sidesteps;

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-25
+
+### Fixed
+
+- `@kimetron/sagbal`: blocker attribution on `blocked` — when a refused
+  step overlapped several solids at once (e.g. a wall and a unit
+  standing in the way), the event named the first hit in doc order,
+  which usually meant a wall registered earlier masked the movable
+  blocker. `blockerId` now prefers a negotiable blocker — a registered
+  agent or an external intent — falling back to the first hit; the
+  event gains `blockerIds` listing every solid overlap in doc order,
+  and `repeat-block` counts the same negotiable blocker. Reported via
+  an escalation from a downstream game whose "move the blocker aside"
+  handling never ran because walls were always blamed
+
+### Changed
+
+- `sagbal-app`: the `blocked` log line appends `(+N)` when more than
+  one solid overlapped the refused step
+
 ## [0.4.0] - 2026-10-23
 
 ### Added
