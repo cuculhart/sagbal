@@ -1339,3 +1339,56 @@ describe('doc serialize', () => {
     expect(() => deserializeDoc('{"foo":1}')).toThrow()
   })
 })
+
+describe('spatial index (v1.3)', () => {
+  const make = (objs: WorldObject[]) => {
+    const e = new Engine({ units: 'mm', origin: 'top-left' }, objs)
+    e.viewport = { x: 0, y: 500, zoom: 1 }
+    return e
+  }
+  const box = (id: string, x: number, y: number, w = 10, h = 10): WorldObject =>
+    ({ id, kind: 'rect', x, y, w, h, solid: true })
+
+  it('narrows queries to nearby candidates and keeps doc order on a large doc', () => {
+    // 600 packed units + one huge non-solid site — the site exceeds the
+    // per-object cell cap and lands in the always-candidates bucket
+    const objs: WorldObject[] = [
+      { id: 'site', kind: 'site', x: -500, y: -500, w: 5000, h: 5000, solid: false },
+    ]
+    for (let r = 0; r < 24; r++)
+      for (let c = 0; c < 25; c++) objs.push(box(`u${r}x${c}`, c * 40, r * 40))
+    const e = make(objs)
+    e.collisionMode = 'reject'
+
+    const hits = e.objectsIn({ x: -1, y: -1, w: 82, h: 12 })
+    expect(hits.map((o) => o.id)).toEqual(['site', 'u0x0', 'u0x1', 'u0x2'])
+    expect(e.collisions({ x: -1, y: -1, w: 82, h: 12 }).map((o) => o.id)).toEqual([
+      'u0x0', 'u0x1', 'u0x2',
+    ])
+    // far away → only the always-candidate site (non-solid → no
+    // collision hits at all), even though the doc is big
+    expect(e.objectsIn({ x: 3000, y: 3000, w: 10, h: 10 }).map((o) => o.id)).toEqual(['site'])
+    expect(e.collisions({ x: 3000, y: 3000, w: 10, h: 10 })).toEqual([])
+    // canPlace agrees with the same narrowed check (offset by 5 —
+    // polysIntersect treats coincident edges as non-overlapping)
+    expect(e.canPlace(box('c', 5, 0))).toBe(false)
+    expect(e.canPlace(box('c', 500, 500))).toBe(true)
+  })
+
+  it('follows doc mutations — the index rebuilds against the new doc', () => {
+    const e = make([box('a', 0, 0), box('b', 1000, 0)])
+    e.collisionMode = 'reject'
+    // build the index with a first query, then mutate
+    expect(e.objectsIn({ x: 990, y: -1, w: 20, h: 12 }).map((o) => o.id)).toEqual(['b'])
+    expect(e.tryMove('b', -980, 0)).toBe(true) // lands at (20,0) — clear of a
+    expect(e.objectsIn({ x: 990, y: -1, w: 20, h: 12 })).toEqual([])
+    expect(e.objectsIn({ x: 15, y: -1, w: 20, h: 12 }).map((o) => o.id)).toEqual(['b'])
+  })
+
+  it('rotated objects are found via their OBB AABB', () => {
+    const e = make([{ ...box('r', 0, 0, 20, 20), rot: 45 }])
+    // the +x corner of a 45°-rotated 20×20 reaches x ≈ 10 + 14.14
+    expect(e.objectAt(e.worldToScreen({ x: 24, y: 10 }))?.id).toBe('r')
+    expect(e.objectAt(e.worldToScreen({ x: 200, y: 200 }))).toBe(null)
+  })
+})

@@ -357,7 +357,83 @@ export class Engine {
   }
 
   private lockedById(id: string): boolean {
-    return this.doc.objects.some((o) => o.id === id && o.locked === true)
+    return this.objById(id)?.locked === true
+  }
+
+  /** Lazily-built spatial + identity index for the current doc.
+      Rebuilt when the doc reference changes — every mutation swaps
+      `this.doc`, so reference comparison is the staleness check.
+      Queries filter `doc.objects` by the candidate set, so results
+      keep doc-registration order exactly. */
+  private idx: {
+    doc: Doc
+    byId: Map<string, WorldObject>
+    footprints: Map<string, Pt[]>
+    cell: number
+    grid: Map<string, string[]>
+    always: string[]
+  } | null = null
+
+  private spatial() {
+    const idx = this.idx
+    if (idx && idx.doc === this.doc) return idx
+    const objects = this.doc.objects
+    const byId = new Map<string, WorldObject>()
+    const footprints = new Map<string, Pt[]>()
+    const boxes = objects.map((o) => {
+      byId.set(o.id, o)
+      const f = footprintOf(o)
+      footprints.set(o.id, f)
+      return aabbOf(f)
+    })
+    // cell ≈ the typical object span — median of the larger AABB
+    // side — so a typical object covers only a few cells
+    const sides = boxes.map((b) => Math.max(b.w, b.h)).sort((a, b) => a - b)
+    const cell = Math.max(sides[Math.floor(sides.length / 2)] ?? 1, 1e-9)
+    const grid = new Map<string, string[]>()
+    const always: string[] = []
+    const MAX_CELLS = 64 // objects spanning more cells go to `always`
+    objects.forEach((o, i) => {
+      const b = boxes[i]
+      const x0 = Math.floor(b.x / cell)
+      const x1 = Math.floor((b.x + b.w) / cell)
+      const y0 = Math.floor(b.y / cell)
+      const y1 = Math.floor((b.y + b.h) / cell)
+      if ((x1 - x0 + 1) * (y1 - y0 + 1) > MAX_CELLS) {
+        always.push(o.id)
+        return
+      }
+      for (let gx = x0; gx <= x1; gx++) {
+        for (let gy = y0; gy <= y1; gy++) {
+          const k = `${gx},${gy}`
+          ;(grid.get(k) ?? grid.set(k, []).get(k)!).push(o.id)
+        }
+      }
+    })
+    this.idx = { doc: this.doc, byId, footprints, cell, grid, always }
+    return this.idx
+  }
+
+  /** Objects whose AABB may intersect `rect` — a superset of the
+      footprint answer, so the exact tests still decide. `always`
+      (objects too large for the grid) is included unconditionally. */
+  private candidates(rect: Rect): ReadonlySet<string> {
+    const idx = this.spatial()
+    const out = new Set<string>(idx.always)
+    const x0 = Math.floor(rect.x / idx.cell)
+    const x1 = Math.floor((rect.x + rect.w) / idx.cell)
+    const y0 = Math.floor(rect.y / idx.cell)
+    const y1 = Math.floor((rect.y + rect.h) / idx.cell)
+    for (let gx = x0; gx <= x1; gx++) {
+      for (let gy = y0; gy <= y1; gy++) {
+        for (const id of idx.grid.get(`${gx},${gy}`) ?? []) out.add(id)
+      }
+    }
+    return out
+  }
+
+  private objById(id: string): WorldObject | undefined {
+    return this.spatial().byId.get(id)
   }
 
   removeSelected(): void {
@@ -444,10 +520,12 @@ export class Engine {
     const w = this.screenToWorld(screenPt)
     const tol = HIT_TOL_PX / (unitToPx(this.doc.units) * this.viewport.zoom)
     const objs = renderOrder(this.doc.objects)
+    const cands = this.candidates({ x: w.x - tol, y: w.y - tol, w: 2 * tol, h: 2 * tol })
     let best: WorldObject | null = null
     let bestRank = -Infinity
     for (let i = objs.length - 1; i >= 0; i--) {
       const o = objs[i]
+      if (!cands.has(o.id)) continue
       if (this.hitFilter && !this.hitFilter(o)) continue
       if (!hitObject(o, w, tol)) continue
       if (!this.hitPriority) return o
@@ -465,8 +543,13 @@ export class Engine {
       Edge-touching is not an overlap. */
   objectsIn(rect: Rect, exclude?: ReadonlySet<string>): WorldObject[] {
     const poly = rectPoly(rect)
+    const idx = this.spatial()
+    const cands = this.candidates(rect)
     return this.doc.objects.filter(
-      (o) => !exclude?.has(o.id) && polysIntersect(poly, footprintOf(o)),
+      (o) =>
+        !exclude?.has(o.id) &&
+        cands.has(o.id) &&
+        polysIntersect(poly, idx.footprints.get(o.id)!),
     )
   }
 
@@ -489,7 +572,7 @@ export class Engine {
       isn't 'none' and the target spot is illegally occupied, or when
       the object is locked/missing. */
   tryMove(id: string, dx: number, dy: number): boolean {
-    const o = this.doc.objects.find((o) => o.id === id)
+    const o = this.objById(id)
     if (!o || o.locked) return false
     if (
       this.collisionMode !== 'none' &&
@@ -507,11 +590,14 @@ export class Engine {
   private blockedBySolid(mover: WorldObject, exclude: ReadonlySet<string>): boolean {
     if (!mover.solid) return false
     const pts = footprintOf(mover)
+    const idx = this.spatial()
+    const cands = this.candidates(aabbOf(pts))
     return this.doc.objects.some(
       (o) =>
         o.solid === true &&
         !exclude.has(o.id) &&
-        polysIntersect(pts, footprintOf(o)) &&
+        cands.has(o.id) &&
+        polysIntersect(pts, idx.footprints.get(o.id)!) &&
         !this.canOverlap?.(mover, o),
     )
   }
@@ -520,9 +606,11 @@ export class Engine {
   portAt(screenPt: Pt): EdgeEndpoint | null {
     const w = this.screenToWorld(screenPt)
     const tol = PORT_TOL_PX / (unitToPx(this.doc.units) * this.viewport.zoom)
+    const cands = this.candidates({ x: w.x - tol, y: w.y - tol, w: 2 * tol, h: 2 * tol })
     let best: EdgeEndpoint | null = null
     let bd = tol
     for (const o of this.doc.objects) {
+      if (!cands.has(o.id)) continue
       for (const p of o.ports ?? []) {
         const wp = objPoint(o, p.fx, p.fy)
         const d = Math.hypot(wp.x - w.x, wp.y - w.y)
@@ -587,7 +675,7 @@ export class Engine {
       If `rewireEdge` returns an existing edge for the grabbed endpoint, the
       gesture rewires that edge instead of creating a new one. */
   startConnect(pt: Pt, obj: string, port?: string): void {
-    const o = this.doc.objects.find((o) => o.id === obj)
+    const o = this.objById(obj)
     if (!o) return
     const ep: EdgeEndpoint = port ? { obj, port } : { obj }
     const re = this.rewireEdge?.(ep)
@@ -671,7 +759,7 @@ export class Engine {
       by `dir` (for a rotated object the handles ride its rotation, so
       `dir` is in the object's own axes). */
   startResize(pt: Pt, id: string, dir: ResizeDir): void {
-    const o = this.doc.objects.find((o) => o.id === id)
+    const o = this.objById(id)
     if (!o || o.locked || (dir.x === 0 && dir.y === 0)) return
     this.mode = 'resize'
     this.resizeId = id
@@ -684,7 +772,7 @@ export class Engine {
 
   /** Begin a rotate gesture on `id` (e.g. its rotate handle). */
   startRotate(pt: Pt, id: string): void {
-    const o = this.doc.objects.find((o) => o.id === id)
+    const o = this.objById(id)
     if (!o || o.locked) return
     this.mode = 'rotate'
     this.rotateId = id
@@ -799,7 +887,7 @@ export class Engine {
       deg = ((deg % 360) + 360) % 360
       this.rotate = { id: this.rotateId, deg }
       if (this.collisionMode !== 'none') {
-        const o = this.doc.objects.find((o) => o.id === this.rotateId)
+        const o = this.objById(this.rotateId)
         this.dragInvalid =
           o !== undefined &&
           this.blockedBySolid({ ...o, rot: deg }, new Set([o.id]))
@@ -839,7 +927,7 @@ export class Engine {
       if (this.collisionMode !== 'none') {
         const moving = new Set(this.dragIds)
         this.dragInvalid = this.dragIds.some((id) => {
-          const o = this.doc.objects.find((o) => o.id === id)
+          const o = this.objById(id)
           return (
             o !== undefined &&
             this.blockedBySolid({ ...o, x: o.x + dx, y: o.y + dy }, moving)
@@ -853,12 +941,15 @@ export class Engine {
     if (this.mode === 'marquee') {
       this.marquee = rectBetween(this.startWorld, w)
       const mq = rectPoly(this.marquee)
+      const idx = this.spatial()
+      const cands = this.candidates(this.marquee)
       const ids = new Set(
         this.doc.objects
           .filter(
             (o) =>
+              cands.has(o.id) &&
               (!this.marqueeFilter || this.marqueeFilter(o)) &&
-              polysIntersect(mq, footprintOf(o)),
+              polysIntersect(mq, idx.footprints.get(o.id)!),
           )
           .map((o) => o.id),
       )
@@ -923,7 +1014,7 @@ export class Engine {
       }
       this.resize = { id: this.resizeId, rect: r }
       if (this.collisionMode !== 'none') {
-        const mover = this.doc.objects.find((o) => o.id === this.resizeId)
+        const mover = this.objById(this.resizeId)
         this.dragInvalid =
           mover !== undefined &&
           this.blockedBySolid({ ...mover, ...r }, new Set([this.resizeId]))
@@ -1016,7 +1107,7 @@ export class Engine {
       }
     }
     if (this.mode === 'rotate' && this.rotate && !blocked) {
-      const o = this.doc.objects.find((o) => o.id === this.rotate!.id)
+      const o = this.objById(this.rotate!.id)
       if (o && this.rotate.deg !== (o.rot ?? 0)) {
         this.doc = rotateObject(this.doc, o.id, this.rotate.deg)
         this.emitDoc()
