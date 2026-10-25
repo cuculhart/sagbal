@@ -529,3 +529,48 @@ describe('neighborhood-limited scans (v0.7)', () => {
     ).toBe(true)
   })
 })
+
+describe('§8 granularity knobs (v0.8)', () => {
+  // 3×3 minus one seat — the center counts 7 neighbors → crowded
+  const ring = (tag: string, cx: number, cy: number) =>
+    [-300, 0, 300]
+      .flatMap((dx) => [-300, 0, 300].map((dy) => ({ dx, dy })))
+      .filter((p) => !(p.dx === 0 && p.dy === 0))
+      .filter((_, i) => i !== 0)
+      .map((p, i) => unit(`${tag}n${i}`, cx + p.dx, cy + p.dy))
+
+  it('crowdScanEvery scans density only every N ticks', () => {
+    const uC = unit('uC', 1000, 1000)
+    const { arbiter, events } = setup([uC, ...ring('a', 1000, 1000)], { crowdScanEvery: 3 })
+
+    arbiter.tick()
+    arbiter.tick()
+    expect(events.some((e) => e.type === 'crowded')).toBe(false)
+    arbiter.tick()
+    expect(events.some((e) => e.type === 'crowded' && e.objectId === 'uC')).toBe(true)
+  })
+
+  it('crowdShard evaluates a round-robin slice each scan', () => {
+    // full 8-seat rings → each center reports `full`. registration
+    // order: uA(0), a-ring(1-8), uB(9), b-ring(10-17) — tick1 scans
+    // odd indices (shard 1 → uB), tick2 even (shard 0 → uA)
+    const packed = (tag: string, cx: number, cy: number) =>
+      [-300, 0, 300]
+        .flatMap((dx) => [-300, 0, 300].map((dy) => ({ dx, dy })))
+        .filter((p) => !(p.dx === 0 && p.dy === 0))
+        .map((p, i) => unit(`${tag}n${i}`, cx + p.dx, cy + p.dy))
+    const uA = unit('uA', 1000, 1000)
+    const uB = unit('uB', 3000, 3000)
+    const { arbiter, events } = setup(
+      [uA, ...packed('a', 1000, 1000), uB, ...packed('b', 3000, 3000)],
+      { crowdShard: 2 },
+    )
+
+    arbiter.tick()
+    expect(events.some((e) => e.type === 'full' && e.objectId === 'uB')).toBe(true)
+    expect(events.some((e) => e.type === 'full' && e.objectId === 'uA')).toBe(false)
+
+    arbiter.tick()
+    expect(events.some((e) => e.type === 'full' && e.objectId === 'uA')).toBe(true)
+  })
+})

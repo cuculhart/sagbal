@@ -94,6 +94,13 @@ npx vitest run              # tests
 
 ## Status
 
+v0.8.0 — shaves the remaining per-tick costs and adds density-scan
+granularity: the object index is patched per move instead of
+rebuilt, wake conditions evaluate once instead of twice, unchanged
+worlds skip the density scan entirely, and `Policy.crowdScanEvery`
+/`crowdShard` space out or slice the crowd scan for large agent
+counts.
+
 v0.7.0 — fixes tick cost under crowds: object lookups became a
 per-tick index and the pairwise scans take candidates from a spatial
 grid, so a rush of many goal-holding agents no longer stalls the

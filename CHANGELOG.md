@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-25
+
+### Added
+
+- `@kimetron/sagbal`: `Policy.crowdScanEvery` — run the local-density
+  scan every N ticks (default 1): `crowded`/`full` facts arrive at
+  most N ticks late, behavior is unchanged
+- `@kimetron/sagbal`: `Policy.crowdShard` — evaluate only 1/N of
+  agents per density scan, round-robin (default 1), so a wake-rush
+  density spike spreads across N scans
+
+### Fixed
+
+- `@kimetron/sagbal`: remaining per-tick costs — the object index is
+  patched in place on a successful `tryMove` instead of being
+  rebuilt (was O(moves·doc)), suspended-goal `wake` conditions are
+  evaluated once instead of twice, the `progress-zero` distance
+  window is a ring buffer instead of a shifting array, and the
+  density scan is skipped entirely when neither the document nor
+  the agent set changed since the last run
+
 ## [0.7.0] - 2026-10-25
 
 ### Fixed

@@ -69,6 +69,8 @@ export interface AgentState {
   sameBlock: { blockerId: string; goalId: string; count: number }
   /** recent distances to the current waypoint — progress-zero window (§7) */
   distHist: number[]
+  /** write cursor into the distHist ring — oldest slot when full (§7) */
+  distI: number
   /** §5 boxed-in broadcast — wants to move but every direction is obstructed */
   boxed: boolean
   /** §8 local density level — 0 clear, 1 crowded, 2 full */
@@ -161,6 +163,12 @@ export interface Policy {
   /** §5 ticks between repeat `diffuse` facts for the same pair —
    *  the push itself stays continuous (default 8) */
   diffuseCooldown?: number
+  /** §8 run the density scan every N ticks (default 1) — facts
+      arrive at most N ticks late; behavior is unchanged */
+  crowdScanEvery?: number
+  /** §8 evaluate only 1/N of agents per scan, round-robin
+      (default 1) — spreads a wake-rush density spike across N scans */
+  crowdShard?: number
 }
 
 export const IMPEDED_LIMIT = 5 // e.g. "5 strikes → try another way"
@@ -273,6 +281,7 @@ function retreatStep(
 
 export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   const agents = new Map<string, AgentState>()
+  let agentsSeq = 0 // bumped on add/remove — the §8 skip watches it
   const externals = new Map<string, { to: Pt; score: number }>()
   const listeners = new Set<(ev: StratumEvent) => void>()
   let now = 0
@@ -299,10 +308,19 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
     stale()
     return r
   }
-  /** tryMove + index invalidation on success */
+  /** tryMove + index update on success — patch the moved entry
+      instead of dropping the whole index (a miss falls back to a
+      full rebuild: the object must be in the doc after a success) */
   const tryMove = (...args: Parameters<Engine['tryMove']>) => {
     const ok = engine.tryMove(...args)
-    if (ok) stale()
+    if (ok) {
+      const o = objCache?.get(args[0])
+      if (o && objCache) {
+        objCache.set(args[0], { ...o, x: o.x + args[1], y: o.y + args[2] })
+      } else {
+        stale()
+      }
+    }
     return ok
   }
 
@@ -325,9 +343,19 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
   const minMoveRatio = policy.minMoveRatio ?? MIN_MOVE_RATIO
   const progressEps = policy.progressEps ?? PROGRESS_EPS
   const diffuseCooldown = policy.diffuseCooldown ?? DIFFUSE_COOLDOWN
+  const crowdScanEvery = policy.crowdScanEvery ?? 1
+  const crowdShard = policy.crowdShard ?? 1
   /** last `diffuse` fact per boxed→pushed pair — the repulsion push
       stays continuous, only the fact is throttled */
   const lastDiffuse = new Map<string, number>()
+  /** §8 skip markers — the doc and agent set the density scan last
+      saw. The doc reference itself is the change detector:
+      engine mutations hand back a fresh doc object */
+  let lastCrowdDoc: typeof engine.doc | undefined
+  let lastCrowdSeq = -1
+  /** shards already evaluated under the current doc — a shard is
+      re-scanned only after the doc or the agent set changed */
+  const crowdSeen = new Set<number>()
   // keep-side sidestep: +1 rotates the forward vector +90° — which is
   // "right" under a top-left (y-down) origin and "left" under
   // bottom-left (y-up), so resolve per doc.origin for visual honesty.
@@ -351,6 +379,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
     a.yieldedUntil = tick
     a.exploded = false
     a.distHist = []
+    a.distI = 0
     emit({ type: 'goal-switch', objectId: a.objectId, from, to: goal?.id })
   }
 
@@ -401,6 +430,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
 
   return {
     add(o) {
+      agentsSeq++
       agents.set(o.id, {
         objectId: o.id,
         suspended: [],
@@ -412,11 +442,13 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         exploded: false,
         sameBlock: { blockerId: '', goalId: '', count: 0 },
         distHist: [],
+        distI: 0,
         boxed: false,
         crowd: 0,
       })
     },
     remove(objectId) {
+      agentsSeq++
       agents.delete(objectId)
     },
     setGoal(objectId, goal) {
@@ -448,7 +480,7 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       for (const a of agents.values()) {
         const ready = a.suspended.filter((s) => afterApp(() => s.wake?.(engine)))
         if (!ready.length) continue
-        a.suspended = a.suspended.filter((s) => !afterApp(() => s.wake?.(engine)))
+        a.suspended = a.suspended.filter((s) => !ready.includes(s))
         for (const s of ready) emit({ type: 'woke', objectId: a.objectId, goalId: s.goal.id })
         if (!a.goal && ready.length) adopt(a, ready[0].goal, now)
       }
@@ -493,14 +525,21 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
         // recorded only while the agent is actually trying (yielded
         // and dwelling ticks don't count). A full window without a
         // new best distance is reported once, then the window restarts.
-        a.distHist.push(d)
-        if (a.distHist.length > progressWindow) a.distHist.shift()
-        if (
-          a.distHist.length === progressWindow &&
-          a.distHist.every((v) => v >= a.distHist[0] - progressEps)
-        ) {
-          emit({ type: 'progress-zero', objectId: a.objectId, goalId: a.goal.id, ticks: progressWindow })
-          a.distHist = []
+        if (a.distHist.length < progressWindow) {
+          a.distHist.push(d)
+        } else {
+          a.distHist[a.distI] = d
+          a.distI = (a.distI + 1) % progressWindow
+        }
+        if (a.distHist.length === progressWindow) {
+          const oldest = a.distHist[a.distI]
+          let min = Infinity
+          for (const v of a.distHist) if (v < min) min = v
+          if (min >= oldest - progressEps) {
+            emit({ type: 'progress-zero', objectId: a.objectId, goalId: a.goal.id, ticks: progressWindow })
+            a.distHist = []
+            a.distI = 0
+          }
         }
       }
 
@@ -776,40 +815,56 @@ export function createArbiter(engine: Engine, policy: Policy = {}): Arbiter {
       //    level transitions only. `full` is the "unresolvable" fact —
       //    what the App does with it stays App-side. Candidates come
       //    from a per-tick hash grid over post-move positions instead
-      //    of an all-pairs scan.
-      const agentCells = new Map<string, string[]>()
-      const ckey = (x: number, y: number) =>
-        `${Math.floor(x / crowdRadius)},${Math.floor(y / crowdRadius)}`
-      for (const a of agents.values()) {
-        const o = obj(a.objectId)
-        if (!o) continue
-        const c = center(o)
-        const k = ckey(c.x, c.y)
-        ;(agentCells.get(k) ?? agentCells.set(k, []).get(k)!).push(a.objectId)
-      }
-      for (const a of agents.values()) {
-        const o = obj(a.objectId)
-        if (!o) continue
-        const c = center(o)
-        const gx = Math.floor(c.x / crowdRadius)
-        const gy = Math.floor(c.y / crowdRadius)
-        let n = 0
-        for (let gx2 = gx - 1; gx2 <= gx + 1; gx2++) {
-          for (let gy2 = gy - 1; gy2 <= gy + 1; gy2++) {
-            for (const id of agentCells.get(`${gx2},${gy2}`) ?? []) {
-              if (id === a.objectId) continue
-              const ob = obj(id)
-              if (!ob) continue
-              const cn = center(ob)
-              if (Math.hypot(cn.x - c.x, cn.y - c.y) <= crowdRadius) n++
+      //    of an all-pairs scan. The scan runs every crowdScanEvery
+      //    ticks and evaluates a round-robin shard of agents; a shard
+      //    already evaluated under the current doc is skipped —
+      //    unchanged positions cannot produce a level transition.
+      if (now % crowdScanEvery === 0) {
+        if (engine.doc !== lastCrowdDoc || agentsSeq !== lastCrowdSeq) {
+          lastCrowdDoc = engine.doc
+          lastCrowdSeq = agentsSeq
+          crowdSeen.clear()
+        }
+        const scanTick = Math.floor(now / crowdScanEvery) % crowdShard
+        if (!crowdSeen.has(scanTick)) {
+          crowdSeen.add(scanTick)
+          const agentCells = new Map<string, string[]>()
+          const ckey = (x: number, y: number) =>
+            `${Math.floor(x / crowdRadius)},${Math.floor(y / crowdRadius)}`
+          for (const a of agents.values()) {
+            const o = obj(a.objectId)
+            if (!o) continue
+            const c = center(o)
+            const k = ckey(c.x, c.y)
+            ;(agentCells.get(k) ?? agentCells.set(k, []).get(k)!).push(a.objectId)
+          }
+          let ai = 0
+          for (const a of agents.values()) {
+            if (ai++ % crowdShard !== scanTick) continue
+            const o = obj(a.objectId)
+            if (!o) continue
+            const c = center(o)
+            const gx = Math.floor(c.x / crowdRadius)
+            const gy = Math.floor(c.y / crowdRadius)
+            let n = 0
+            for (let gx2 = gx - 1; gx2 <= gx + 1; gx2++) {
+              for (let gy2 = gy - 1; gy2 <= gy + 1; gy2++) {
+                for (const id of agentCells.get(`${gx2},${gy2}`) ?? []) {
+                  if (id === a.objectId) continue
+                  const ob = obj(id)
+                  if (!ob) continue
+                  const cn = center(ob)
+                  if (Math.hypot(cn.x - c.x, cn.y - c.y) <= crowdRadius) n++
+                }
+              }
             }
+            const lvl = n >= fullN ? 2 : n >= crowdN ? 1 : 0
+            if (lvl === a.crowd) continue
+            a.crowd = lvl
+            if (lvl === 2) emit({ type: 'full', objectId: a.objectId, count: n })
+            else if (lvl === 1) emit({ type: 'crowded', objectId: a.objectId, count: n })
           }
         }
-        const lvl = n >= fullN ? 2 : n >= crowdN ? 1 : 0
-        if (lvl === a.crowd) continue
-        a.crowd = lvl
-        if (lvl === 2) emit({ type: 'full', objectId: a.objectId, count: n })
-        else if (lvl === 1) emit({ type: 'crowded', objectId: a.objectId, count: n })
       }
     },
   }
